@@ -2,7 +2,9 @@
 
 A lightweight, transparent desktop overlay for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on macOS. Clui CC wraps the Claude Code CLI in a floating pill interface with multi-tab sessions, a permission approval UI, voice input, and a skills marketplace.
 
-![Clui CC Screenshot](CLUI.png)
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/NqRBIpaA4Fk/maxresdefault.jpg)](https://www.youtube.com/watch?v=NqRBIpaA4Fk)
 
 ## Features
 
@@ -42,11 +44,11 @@ npm run build
 npx electron .
 ```
 
-Or use the convenience scripts:
+Or use the convenience commands:
 
 ```bash
-./start.sh    # Build + run
-./stop.sh     # Kill running instance
+./start.command    # Build + run
+./stop.command     # Stop the app
 ```
 
 Toggle the overlay: **Alt+Space** (or **Cmd+Shift+K** as fallback).
