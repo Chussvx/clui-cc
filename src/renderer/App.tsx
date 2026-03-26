@@ -117,11 +117,8 @@ export default function App() {
       e.preventDefault()
       // Double-click: snap back to default position
       if (e.detail >= 2) {
-        const resetWindowDy = initialWindowY - windowYRef.current
-        if (resetWindowDy !== 0) {
-          window.clui.startWindowDrag(0, resetWindowDy)
-          windowYRef.current = initialWindowY
-        }
+        window.clui.resetWindowPosition()
+        windowYRef.current = initialWindowY
         cardYRef.current = 0
         document.documentElement.style.setProperty('--clui-card-y', '0px')
         return
