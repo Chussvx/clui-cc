@@ -610,7 +610,10 @@ ipcMain.handle(IPC.ATTACH_FILES, async () => {
     filters: [
       { name: 'All Files', extensions: ['*'] },
       { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'] },
-      { name: 'Code', extensions: ['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'md', 'json', 'yaml', 'toml'] },
+      { name: 'Documents', extensions: ['txt', 'md', 'markdown', 'mdx', 'rst', 'pdf', 'html', 'htm', 'csv', 'tsv', 'xml'] },
+      { name: 'Code', extensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'py', 'rb', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'cs', 'swift', 'kt', 'sh', 'bash', 'sql'] },
+      { name: 'Config', extensions: ['json', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'env', 'conf', 'properties'] },
+      { name: 'Styles', extensions: ['css', 'scss', 'sass', 'less', 'vue', 'svelte'] },
     ],
   }
   const result = process.platform === 'darwin'
@@ -622,24 +625,65 @@ ipcMain.handle(IPC.ATTACH_FILES, async () => {
   const { readFileSync, statSync } = require('fs')
 
   const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'])
+  const TEXT_EXTS = new Set([
+    '.txt', '.md', '.markdown', '.rst', '.html', '.htm', '.xml', '.csv', '.tsv',
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env', '.properties',
+    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.rb', '.rs', '.go',
+    '.java', '.kt', '.kts', '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp',
+    '.cs', '.swift', '.m', '.mm', '.r', '.R', '.lua', '.pl', '.pm',
+    '.sh', '.bash', '.zsh', '.fish', '.bat', '.cmd', '.ps1', '.psm1',
+    '.sql', '.graphql', '.gql', '.proto', '.tf', '.hcl',
+    '.css', '.scss', '.sass', '.less', '.styl',
+    '.vue', '.svelte', '.astro', '.mdx',
+    '.dockerfile', '.dockerignore', '.gitignore', '.editorconfig',
+    '.lock', '.log', '.diff', '.patch',
+  ])
   const mimeMap: Record<string, string> = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-    '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
-    '.json': 'application/json', '.yaml': 'text/yaml', '.toml': 'text/toml',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain', '.md': 'text/markdown', '.markdown': 'text/markdown',
+    '.rst': 'text/x-rst', '.html': 'text/html', '.htm': 'text/html',
+    '.xml': 'text/xml', '.csv': 'text/csv', '.tsv': 'text/tab-separated-values',
+    '.json': 'application/json', '.yaml': 'text/yaml', '.yml': 'text/yaml',
+    '.toml': 'text/toml', '.ini': 'text/plain', '.cfg': 'text/plain',
+    '.conf': 'text/plain', '.env': 'text/plain', '.properties': 'text/plain',
+    '.ts': 'text/typescript', '.tsx': 'text/typescript', '.js': 'text/javascript',
+    '.jsx': 'text/javascript', '.mjs': 'text/javascript', '.cjs': 'text/javascript',
+    '.py': 'text/x-python', '.rb': 'text/x-ruby', '.rs': 'text/x-rust',
+    '.go': 'text/x-go', '.java': 'text/x-java', '.c': 'text/x-c',
+    '.cpp': 'text/x-c++', '.h': 'text/x-c', '.hpp': 'text/x-c++',
+    '.cs': 'text/x-csharp', '.swift': 'text/x-swift', '.kt': 'text/x-kotlin',
+    '.sh': 'text/x-shellscript', '.bash': 'text/x-shellscript',
+    '.sql': 'text/x-sql', '.graphql': 'text/x-graphql',
+    '.css': 'text/css', '.scss': 'text/x-scss', '.less': 'text/x-less',
+    '.vue': 'text/x-vue', '.svelte': 'text/x-svelte',
+    '.mdx': 'text/mdx', '.log': 'text/plain', '.diff': 'text/x-diff',
+    '.patch': 'text/x-diff', '.lock': 'text/plain',
   }
 
   return result.filePaths.map((fp: string) => {
     const ext = extname(fp).toLowerCase()
-    const mime = mimeMap[ext] || 'application/octet-stream'
+    const name = basename(fp).toLowerCase()
+    // Handle extensionless dotfiles (Dockerfile, Makefile, etc.)
+    const isTextByName = ['dockerfile', 'makefile', 'rakefile', 'gemfile', 'procfile', 'vagrantfile'].includes(name)
+    const mime = mimeMap[ext] || (TEXT_EXTS.has(ext) || isTextByName ? 'text/plain' : 'application/octet-stream')
     const stat = statSync(fp)
     let dataUrl: string | undefined
+    let textContent: string | undefined
 
     // Generate preview data URL for images (max 2MB to keep IPC fast)
     if (IMAGE_EXTS.has(ext) && stat.size < 2 * 1024 * 1024) {
       try {
         const buf = readFileSync(fp)
         dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+      } catch {}
+    }
+
+    // Read text content for text-based files (max 512KB)
+    if ((TEXT_EXTS.has(ext) || isTextByName) && stat.size < 512 * 1024) {
+      try {
+        textContent = readFileSync(fp, 'utf-8')
       } catch {}
     }
 
@@ -650,6 +694,7 @@ ipcMain.handle(IPC.ATTACH_FILES, async () => {
       path: fp,
       mimeType: mime,
       dataUrl,
+      textContent,
       size: stat.size,
     }
   })

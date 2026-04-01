@@ -1,20 +1,18 @@
 import React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, FileText, Image, FileCode, File } from '@phosphor-icons/react'
+import { X, FileText, Image, FileCode, File, FileCss, FileHtml, FileSql } from '@phosphor-icons/react'
 import { useColors } from '../theme'
 import type { Attachment } from '../../shared/types'
 
-const FILE_ICONS: Record<string, React.ReactNode> = {
-  'image/png': <Image size={14} />,
-  'image/jpeg': <Image size={14} />,
-  'image/gif': <Image size={14} />,
-  'image/webp': <Image size={14} />,
-  'image/svg+xml': <Image size={14} />,
-  'text/plain': <FileText size={14} />,
-  'text/markdown': <FileText size={14} />,
-  'application/json': <FileCode size={14} />,
-  'text/yaml': <FileCode size={14} />,
-  'text/toml': <FileCode size={14} />,
+function getFileIcon(mime?: string): React.ReactNode {
+  if (!mime) return <File size={14} />
+  if (mime.startsWith('image/')) return <Image size={14} />
+  if (mime === 'text/html') return <FileHtml size={14} />
+  if (mime === 'text/css' || mime === 'text/x-scss' || mime === 'text/x-less') return <FileCss size={14} />
+  if (mime === 'text/x-sql') return <FileSql size={14} />
+  if (mime.startsWith('text/x-') || mime === 'text/typescript' || mime === 'text/javascript' || mime === 'application/json') return <FileCode size={14} />
+  if (mime.startsWith('text/')) return <FileText size={14} />
+  return <File size={14} />
 }
 
 export function AttachmentChips({
@@ -58,7 +56,7 @@ export function AttachmentChips({
               />
             ) : (
               <span className="flex-shrink-0" style={{ color: colors.textTertiary }}>
-                {FILE_ICONS[a.mimeType || ''] || <File size={14} />}
+                {getFileIcon(a.mimeType)}
               </span>
             )}
 

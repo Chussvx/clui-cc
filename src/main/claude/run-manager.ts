@@ -1,13 +1,14 @@
 import { spawn, execSync, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, dirname, delimiter } from 'path'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
 
+const IS_WIN = process.platform === 'win32'
 const MAX_RING_LINES = 100
 const DEBUG = process.env.CLUI_DEBUG === '1'
 
@@ -101,6 +102,37 @@ export class RunManager extends EventEmitter {
   }
 
   private _findClaudeBinary(): string {
+    if (IS_WIN) {
+      // Windows: check common locations for claude.cmd / claude.exe
+      const appData = process.env.APPDATA || ''
+      const winCandidates = [
+        ...(appData ? [join(appData, 'npm', 'claude.cmd')] : []),
+        join(homedir(), '.npm-global', 'claude.cmd'),
+        'C:\\Program Files\\nodejs\\claude.cmd',
+      ]
+
+      for (const c of winCandidates) {
+        try {
+          execSync(`if exist "${c}" exit 0`, { stdio: 'ignore', shell: 'cmd.exe' })
+          return c
+        } catch {}
+      }
+
+      // Try `where claude` to find it on PATH
+      try {
+        const found = execSync('where claude.cmd', { encoding: 'utf-8', env: getCliEnv() }).trim()
+        if (found) return found.split('\n')[0].trim()
+      } catch {}
+
+      try {
+        const found = execSync('where claude', { encoding: 'utf-8', env: getCliEnv() }).trim()
+        if (found) return found.split('\n')[0].trim()
+      } catch {}
+
+      return 'claude'
+    }
+
+    // Unix: check well-known paths then shell lookup
     const candidates = [
       '/usr/local/bin/claude',
       '/opt/homebrew/bin/claude',
@@ -127,9 +159,9 @@ export class RunManager extends EventEmitter {
 
   private _getEnv(): NodeJS.ProcessEnv {
     const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
-    if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+    const binDir = dirname(this.claudeBinary)
+    if (binDir && binDir !== '.' && env.PATH && !env.PATH.includes(binDir)) {
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
 
     return env
@@ -304,11 +336,25 @@ export class RunManager extends EventEmitter {
     // ─── Write prompt to stdin (stream-json format, keep open) ───
     // Using --input-format stream-json for bidirectional communication.
     // Stdin stays open so follow-up messages can be sent.
+    const contentBlocks: Array<Record<string, unknown>> = []
+
+    // Add image content blocks (base64) before text
+    if (options.images && options.images.length > 0) {
+      for (const img of options.images) {
+        contentBlocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.data },
+        })
+      }
+    }
+
+    contentBlocks.push({ type: 'text', text: options.prompt })
+
     const userMessage = JSON.stringify({
       type: 'user',
       message: {
         role: 'user',
-        content: [{ type: 'text', text: options.prompt }],
+        content: contentBlocks,
       },
     })
     child.stdin!.write(userMessage + '\n')
