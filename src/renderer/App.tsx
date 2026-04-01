@@ -375,33 +375,35 @@ export default function App() {
             {/* Panel toolbar — notification + cost buttons */}
             <div
               data-clui-ui
-              className="flex items-center justify-end gap-1 mb-1 mr-1"
+              className="flex items-center justify-end gap-1.5 mb-1.5 mr-2"
               style={{ position: 'relative', zIndex: 16 }}
             >
               <button
-                className="w-7 h-7 rounded-full flex items-center justify-center transition-colors relative"
+                className="w-8 h-8 rounded-full flex items-center justify-center transition-colors relative"
                 style={{
-                  background: activePanel === 'cost' ? colors.accent : colors.surfaceHover,
-                  color: activePanel === 'cost' ? colors.textOnAccent : colors.textTertiary,
+                  background: activePanel === 'cost' ? colors.accent : colors.containerBg,
+                  color: activePanel === 'cost' ? colors.textOnAccent : colors.textSecondary,
+                  border: `1px solid ${colors.containerBorder}`,
                 }}
                 title="Cost & Usage"
                 onClick={() => togglePanel('cost')}
               >
-                <CurrencyDollar size={14} />
+                <CurrencyDollar size={16} />
               </button>
               <button
-                className="w-7 h-7 rounded-full flex items-center justify-center transition-colors relative"
+                className="w-8 h-8 rounded-full flex items-center justify-center transition-colors relative"
                 style={{
-                  background: activePanel === 'notifications' ? colors.accent : colors.surfaceHover,
-                  color: activePanel === 'notifications' ? colors.textOnAccent : colors.textTertiary,
+                  background: activePanel === 'notifications' ? colors.accent : colors.containerBg,
+                  color: activePanel === 'notifications' ? colors.textOnAccent : colors.textSecondary,
+                  border: `1px solid ${colors.containerBorder}`,
                 }}
                 title="Notifications"
                 onClick={() => togglePanel('notifications')}
               >
-                <Bell size={14} />
+                <Bell size={16} />
                 {notificationCount > 0 && (
                   <span
-                    className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold"
+                    className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
                     style={{ background: '#ef4444', color: '#fff' }}
                   >
                     {notificationCount > 9 ? '9+' : notificationCount}
