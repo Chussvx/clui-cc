@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
+import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad } from '@phosphor-icons/react'
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
@@ -37,6 +37,8 @@ export function InputBar() {
   const addAttachments = useSessionStore((s) => s.addAttachments)
   const removeAttachment = useSessionStore((s) => s.removeAttachment)
 
+  const planMode = useSessionStore((s) => s.planMode)
+  const togglePlanMode = useSessionStore((s) => s.togglePlanMode)
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const preferredModel = useSessionStore((s) => s.preferredModel)
@@ -416,7 +418,9 @@ export function InputBar() {
                       ? 'Transcribing...'
                       : isBusy
                         ? 'Type to queue a message...'
-                        : 'Ask Claude Code anything...'
+                        : planMode
+                          ? 'Describe your plan...'
+                          : 'Ask Claude Code anything...'
               }
               rows={1}
               className="w-full bg-transparent resize-none"
@@ -432,6 +436,18 @@ export function InputBar() {
             />
 
             <div className="flex items-center justify-end gap-1" style={{ marginTop: 0, paddingBottom: 4 }}>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={togglePlanMode}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                style={{
+                  background: planMode ? colors.accent : colors.surfaceHover,
+                  color: planMode ? colors.textOnAccent : colors.textTertiary,
+                }}
+                title={planMode ? 'Plan mode on — click to disable' : 'Enable plan mode (research only, no changes)'}
+              >
+                <Notepad size={16} />
+              </button>
               <VoiceButtons
                 voiceState={voiceState}
                 isConnecting={isConnecting}
@@ -474,7 +490,9 @@ export function InputBar() {
                       ? 'Transcribing...'
                       : isBusy
                         ? 'Type to queue a message...'
-                        : 'Ask Claude Code anything...'
+                        : planMode
+                          ? 'Describe your plan...'
+                          : 'Ask Claude Code anything...'
               }
               rows={1}
               className="flex-1 bg-transparent resize-none"
@@ -490,6 +508,18 @@ export function InputBar() {
             />
 
             <div className="flex items-center gap-1 shrink-0 ml-2">
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={togglePlanMode}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                style={{
+                  background: planMode ? colors.accent : colors.surfaceHover,
+                  color: planMode ? colors.textOnAccent : colors.textTertiary,
+                }}
+                title={planMode ? 'Plan mode on — click to disable' : 'Enable plan mode (research only, no changes)'}
+              >
+                <Notepad size={16} />
+              </button>
               <VoiceButtons
                 voiceState={voiceState}
                 isConnecting={isConnecting}

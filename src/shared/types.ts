@@ -137,6 +137,8 @@ export interface Attachment {
   mimeType?: string
   /** Base64 data URL for image previews */
   dataUrl?: string
+  /** Text content for text-based files (read at attach time) */
+  textContent?: string
   /** File size in bytes */
   size?: number
 }
@@ -188,7 +190,11 @@ export interface RunResult {
   numTurns: number
   usage: UsageData
   sessionId: string
+  /** Model ID used for this run (populated when auto-mode resolves a model) */
+  model?: string
 }
+
+export type PanelType = 'terminal' | 'mcp' | 'cost' | 'prompts' | 'notifications' | null
 
 // ─── Canonical Events (normalized from raw stream) ───
 
@@ -221,6 +227,8 @@ export interface RunOptions {
   hookSettingsPath?: string
   /** Extra directories to add via --add-dir (session-preserving) */
   addDirs?: string[]
+  /** Base64 image data URLs to include as image content blocks */
+  images?: Array<{ mediaType: string; data: string }>
 }
 
 // ─── Control Plane Types ───

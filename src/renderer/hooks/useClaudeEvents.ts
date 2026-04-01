@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { useSessionStore } from '../stores/sessionStore'
+import { useSessionStore, getModelDisplayLabel } from '../stores/sessionStore'
+import { useNotificationStore } from '../stores/notificationStore'
 import type { NormalizedEvent } from '../../shared/types'
 
 /**
@@ -55,6 +56,38 @@ export function useClaudeEvents() {
           cancelAnimationFrame(rafIdRef.current)
           flushChunks()
         }
+        // Dispatch notifications for key events
+        if (event.type === 'task_complete') {
+          const e = event as NormalizedEvent & { type: 'task_complete'; costUsd: number; durationMs: number }
+          useNotificationStore.getState().addNotification({
+            type: 'success',
+            message: `Task completed — $${e.costUsd.toFixed(4)} · ${(e.durationMs / 1000).toFixed(1)}s`,
+            duration: 5000,
+          })
+          // Notify about auto-selected model
+          const { lastResolvedModel, preferredModel } = useSessionStore.getState()
+          if (preferredModel === 'auto' && lastResolvedModel) {
+            useNotificationStore.getState().addNotification({
+              type: 'model-selected',
+              message: `Auto mode selected ${getModelDisplayLabel(lastResolvedModel)}`,
+              duration: 6000,
+            })
+          }
+        } else if (event.type === 'error') {
+          const e = event as NormalizedEvent & { type: 'error'; message: string }
+          useNotificationStore.getState().addNotification({
+            type: 'error',
+            message: e.message,
+            duration: 8000,
+          })
+        } else if (event.type === 'rate_limit') {
+          useNotificationStore.getState().addNotification({
+            type: 'warning',
+            message: 'Rate limited. Please wait...',
+            duration: 10000,
+          })
+        }
+
         handleNormalizedEvent(tabId, event)
       }
     })

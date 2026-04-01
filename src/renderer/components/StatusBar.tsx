@@ -53,6 +53,7 @@ function ModelPicker() {
   }
 
   const activeLabel = (() => {
+    if (preferredModel === 'auto') return 'Auto'
     if (preferredModel) {
       const m = AVAILABLE_MODELS.find((m) => m.id === preferredModel)
       return m?.label || getModelDisplayLabel(preferredModel)
@@ -102,6 +103,18 @@ function ModelPicker() {
           }}
         >
           <div className="py-1">
+            <button
+              onClick={() => { setPreferredModel('auto'); setOpen(false) }}
+              className="w-full flex items-center justify-between px-3 py-1.5 text-[11px] transition-colors"
+              style={{
+                color: preferredModel === 'auto' ? colors.textPrimary : colors.textSecondary,
+                fontWeight: preferredModel === 'auto' ? 600 : 400,
+              }}
+            >
+              Auto
+              {preferredModel === 'auto' && <Check size={12} style={{ color: colors.accent }} />}
+            </button>
+            <div style={{ height: 1, background: colors.popoverBorder, margin: '2px 8px' }} />
             {AVAILABLE_MODELS.map((m) => {
               const isSelected = preferredModel === m.id || (!preferredModel && m.id === AVAILABLE_MODELS[0].id)
               return (

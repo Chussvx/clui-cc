@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType } from '../../shared/types'
 import { useThemeStore } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
 
@@ -39,6 +39,18 @@ export function getModelDisplayLabel(modelId: string): string {
   return has1MContext ? `${normalizedId} (1M)` : normalizedId
 }
 
+// ─── Auto Model Selection ───
+
+const COMPLEX_KEYWORDS = /\b(refactor|optimize|architect|redesign|migrate|rewrite|implement|build)\b/i
+const MEDIUM_KEYWORDS = /\b(fix|debug|update|change|modify|add|remove|test)\b/i
+
+export function autoSelectModel(prompt: string): string {
+  const wordCount = prompt.split(/\s+/).length
+  if (wordCount > 300 || COMPLEX_KEYWORDS.test(prompt)) return 'claude-opus-4-6'
+  if (wordCount > 80 || MEDIUM_KEYWORDS.test(prompt)) return 'claude-sonnet-4-6'
+  return 'claude-haiku-4-5-20251001'
+}
+
 // ─── Store ───
 
 interface StaticInfo {
@@ -60,6 +72,15 @@ interface State {
   preferredModel: string | null
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls */
   permissionMode: 'ask' | 'auto'
+
+  /** Plan mode — prepends system instruction telling Claude to only plan, not edit */
+  planMode: boolean
+  /** Currently open panel (mutual exclusion — only one at a time) */
+  activePanel: PanelType
+  /** Per-session cost history */
+  costHistory: import('../../shared/types').RunResult[]
+  /** Model resolved by auto-select for the current in-flight request */
+  lastResolvedModel: string | null
 
   // Marketplace state
   marketplaceOpen: boolean
@@ -87,6 +108,9 @@ interface State {
   setMarketplaceFilter: (filter: string) => void
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
+  togglePlanMode: () => void
+  togglePanel: (panel: PanelType) => void
+  clearCostHistory: () => void
   buildYourOwn: () => void
   resumeSession: (sessionId: string, title?: string, projectPath?: string) => Promise<string>
   addSystemMessage: (content: string) => void
@@ -156,6 +180,10 @@ export const useSessionStore = create<State>((set, get) => ({
   staticInfo: null,
   preferredModel: null,
   permissionMode: 'ask',
+  planMode: false,
+  activePanel: null,
+  costHistory: [],
+  lastResolvedModel: null,
 
   // Marketplace
   marketplaceOpen: false,
@@ -189,6 +217,18 @@ export const useSessionStore = create<State>((set, get) => ({
   setPermissionMode: (mode) => {
     set({ permissionMode: mode })
     window.clui.setPermissionMode(mode)
+  },
+
+  togglePlanMode: () => {
+    set((s) => ({ planMode: !s.planMode }))
+  },
+
+  togglePanel: (panel) => {
+    set((s) => ({ activePanel: s.activePanel === panel ? null : panel }))
+  },
+
+  clearCostHistory: () => {
+    set({ costHistory: [] })
   },
 
   createTab: async () => {
@@ -370,6 +410,7 @@ export const useSessionStore = create<State>((set, get) => ({
   clearTab: () => {
     const { activeTabId } = get()
     set((s) => ({
+      costHistory: [],
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
           ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, queuedPrompts: [] }
@@ -561,10 +602,15 @@ export const useSessionStore = create<State>((set, get) => ({
 
     // Build full prompt with attachment context
     let fullPrompt = prompt
+    const imageAttachments = tab.attachments.filter((a) => a.type === 'image' && a.dataUrl)
     if (tab.attachments.length > 0) {
       const attachmentCtx = tab.attachments
-        .map((a) => `[Attached ${a.type}: ${a.path}]`)
-        .join('\n')
+        .map((a) => {
+          if (a.textContent) return `[Attached file: ${a.name}]\n\`\`\`\n${a.textContent}\n\`\`\``
+          if (a.type === 'image') return `[Attached image: ${a.name}]`
+          return `[Attached ${a.type}: ${a.path}]`
+        })
+        .join('\n\n')
       fullPrompt = `${attachmentCtx}\n\n${prompt}`
     }
 
@@ -610,13 +656,36 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
 
     // Send to backend — ControlPlane will queue if a run is active
-    const { preferredModel } = get()
+    const { preferredModel, planMode } = get()
+
+    // Plan mode: prepend system instruction
+    if (planMode) {
+      fullPrompt = `[PLAN MODE] You are in PLAN MODE. Analyze the request, research the approach, and describe your plan in detail. Do NOT make any code changes.\n\n${fullPrompt}`
+    }
+
+    // Auto model selection
+    let resolvedModel = preferredModel
+    if (preferredModel === 'auto') {
+      resolvedModel = autoSelectModel(fullPrompt)
+      set({ lastResolvedModel: resolvedModel })
+    }
+
+    // Extract base64 data from image attachments for content blocks
+    const images = imageAttachments
+      .map((a) => {
+        const match = a.dataUrl!.match(/^data:([^;]+);base64,(.+)$/)
+        if (!match) return null
+        return { mediaType: match[1], data: match[2] }
+      })
+      .filter((x): x is { mediaType: string; data: string } => x !== null)
+
     window.clui.prompt(activeTabId, requestId, {
       prompt: fullPrompt,
       projectPath: resolvedPath,
       sessionId: tab.claudeSessionId || undefined,
-      model: preferredModel || undefined,
+      model: resolvedModel || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
+      images: images.length > 0 ? images : undefined,
     }).catch((err: Error) => {
       get().handleError(activeTabId, {
         message: err.message,
@@ -770,18 +839,20 @@ export const useSessionStore = create<State>((set, get) => ({
             break
           }
 
-          case 'task_complete':
+          case 'task_complete': {
             updated.status = 'completed'
             updated.activeRequestId = null
             updated.currentActivity = ''
             updated.permissionQueue = []
-            updated.lastResult = {
+            const runResult = {
               totalCostUsd: event.costUsd,
               durationMs: event.durationMs,
               numTurns: event.numTurns,
               usage: event.usage,
               sessionId: event.sessionId,
+              model: s.lastResolvedModel || updated.sessionModel || undefined,
             }
+            updated.lastResult = runResult
             // ── Final text fallback ──
             // If neither text_chunks nor task_update text produced an assistant message,
             // use event.result (the CLI's assembled final output) as last resort.
@@ -817,6 +888,7 @@ export const useSessionStore = create<State>((set, get) => ({
             // Play notification sound if window is hidden
             playNotificationIfHidden()
             break
+          }
 
           case 'error':
             updated.status = 'failed'
@@ -882,6 +954,19 @@ export const useSessionStore = create<State>((set, get) => ({
         return updated
       })
 
+      // Push completed runs to session-level costHistory
+      if (event.type === 'task_complete') {
+        const runResult = {
+          totalCostUsd: event.costUsd,
+          durationMs: event.durationMs,
+          numTurns: event.numTurns,
+          usage: event.usage,
+          sessionId: event.sessionId,
+          model: s.lastResolvedModel || tabs.find((t) => t.id === tabId)?.sessionModel || undefined,
+        }
+        return { tabs, costHistory: [...s.costHistory, runResult], lastResolvedModel: null }
+      }
+
       return { tabs }
     })
   },
@@ -932,3 +1017,30 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 }))
+
+// ─── HMR state persistence ───
+// During `npm run dev`, Vite HMR re-executes this module on every code change.
+// Without this guard, `create(...)` runs again, resetting the store to defaults.
+// We stash the live state on the module's hot data and restore it after reload.
+if (import.meta.hot) {
+  const prev = import.meta.hot.data?.sessionStoreState as State | undefined
+  if (prev) {
+    const { tabs, activeTabId, isExpanded, staticInfo, preferredModel, permissionMode,
+      planMode, activePanel, costHistory, lastResolvedModel,
+      marketplaceOpen, marketplaceCatalog, marketplaceLoading, marketplaceError,
+      marketplaceInstalledNames, marketplacePluginStates, marketplaceSearch, marketplaceFilter,
+    } = prev
+    useSessionStore.setState({
+      tabs, activeTabId, isExpanded, staticInfo, preferredModel, permissionMode,
+      planMode, activePanel, costHistory, lastResolvedModel,
+      marketplaceOpen, marketplaceCatalog, marketplaceLoading, marketplaceError,
+      marketplaceInstalledNames, marketplacePluginStates, marketplaceSearch, marketplaceFilter,
+    })
+  }
+
+  import.meta.hot.dispose(() => {
+    import.meta.hot!.data.sessionStoreState = useSessionStore.getState()
+  })
+
+  import.meta.hot.accept()
+}

@@ -1,11 +1,14 @@
 import React, { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Paperclip, Camera, HeadCircuit } from '@phosphor-icons/react'
+import { Paperclip, Camera, HeadCircuit, Bell, CurrencyDollar } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
 import { ConversationView } from './components/ConversationView'
 import { InputBar } from './components/InputBar'
 import { StatusBar } from './components/StatusBar'
 import { MarketplacePanel } from './components/MarketplacePanel'
+import { NotificationPanel } from './components/NotificationPanel'
+import { CostDashboardPanel } from './components/CostDashboardPanel'
+import { useNotificationStore } from './stores/notificationStore'
 import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
@@ -185,6 +188,9 @@ export default function App() {
 
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const marketplaceOpen = useSessionStore((s) => s.marketplaceOpen)
+  const activePanel = useSessionStore((s) => s.activePanel)
+  const togglePanel = useSessionStore((s) => s.togglePanel)
+  const notificationCount = useNotificationStore((s) => s.notifications.length)
   const isRunning = activeTabStatus === 'running' || activeTabStatus === 'connecting'
 
   // Layout dimensions — expandedUI widens and heightens the panel
@@ -244,6 +250,37 @@ export default function App() {
                     <MarketplacePanel />
                   </div>
                 </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
+
+          {/* ─── Notification / Cost panels ─── */}
+          <AnimatePresence>
+            {(activePanel === 'notifications' || activePanel === 'cost') && (
+              <div
+                data-clui-ui
+                style={{
+                  width: 720,
+                  maxWidth: 720,
+                  marginLeft: '50%',
+                  transform: 'translateX(-50%)',
+                  marginBottom: 14,
+                  position: 'relative',
+                  zIndex: 30,
+                }}
+              >
+                <div
+                  data-clui-ui
+                  className="glass-surface overflow-hidden no-drag"
+                  style={{ borderRadius: 24, maxHeight: 470 }}
+                >
+                  {activePanel === 'notifications' && (
+                    <NotificationPanel onClose={() => togglePanel('notifications')} />
+                  )}
+                  {activePanel === 'cost' && (
+                    <CostDashboardPanel onClose={() => togglePanel('cost')} />
+                  )}
+                </div>
               </div>
             )}
           </AnimatePresence>
@@ -333,6 +370,44 @@ export default function App() {
                   <HeadCircuit size={17} />
                 </button>
               </div>
+            </div>
+
+            {/* Panel toolbar — notification + cost buttons */}
+            <div
+              data-clui-ui
+              className="flex items-center justify-end gap-1 mb-1 mr-1"
+              style={{ position: 'relative', zIndex: 16 }}
+            >
+              <button
+                className="w-7 h-7 rounded-full flex items-center justify-center transition-colors relative"
+                style={{
+                  background: activePanel === 'cost' ? colors.accent : colors.surfaceHover,
+                  color: activePanel === 'cost' ? colors.textOnAccent : colors.textTertiary,
+                }}
+                title="Cost & Usage"
+                onClick={() => togglePanel('cost')}
+              >
+                <CurrencyDollar size={14} />
+              </button>
+              <button
+                className="w-7 h-7 rounded-full flex items-center justify-center transition-colors relative"
+                style={{
+                  background: activePanel === 'notifications' ? colors.accent : colors.surfaceHover,
+                  color: activePanel === 'notifications' ? colors.textOnAccent : colors.textTertiary,
+                }}
+                title="Notifications"
+                onClick={() => togglePanel('notifications')}
+              >
+                <Bell size={14} />
+                {notificationCount > 0 && (
+                  <span
+                    className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold"
+                    style={{ background: '#ef4444', color: '#fff' }}
+                  >
+                    {notificationCount > 9 ? '9+' : notificationCount}
+                  </span>
+                )}
+              </button>
             </div>
 
             {/* Input pill */}
