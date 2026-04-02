@@ -260,6 +260,29 @@ function PermissionModePicker() {
   )
 }
 
+/* ─── Session Cost (inline in StatusBar) ─── */
+
+function SessionCost() {
+  const totalCost = useSessionStore((s) => s.costHistory.reduce((sum, r) => sum + r.totalCostUsd, 0))
+  const runCount = useSessionStore((s) => s.costHistory.length)
+  const colors = useColors()
+
+  if (runCount === 0) return null
+
+  return (
+    <>
+      <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+      <span
+        className="text-[10px] px-1.5 py-0.5 rounded-full"
+        style={{ color: colors.textTertiary }}
+        title={`${runCount} run${runCount !== 1 ? 's' : ''} this session`}
+      >
+        ${totalCost < 0.01 ? '<0.01' : totalCost.toFixed(2)}
+      </span>
+    </>
+  )
+}
+
 /* ─── StatusBar ─── */
 
 /** Get a compact display path: basename for deep paths, ~ for home */
@@ -446,6 +469,8 @@ export function StatusBar() {
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 
         <PermissionModePicker />
+
+        <SessionCost />
       </div>
 
       {/* Right — Open in CLI */}

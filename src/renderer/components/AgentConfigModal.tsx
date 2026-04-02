@@ -1,6 +1,8 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Plus, Robot, UserCircle, MagnifyingGlass, PencilSimple, Eye, Wrench } from '@phosphor-icons/react'
+import { X, Plus, Robot, UserCircle, MagnifyingGlass, PencilSimple, Eye, Wrench, CaretDown } from '@phosphor-icons/react'
+import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
 import type { AgentDefinition, AgentRole } from '../../shared/types'
 
@@ -8,15 +10,20 @@ interface Props {
   open: boolean
   onClose: () => void
   onConfirm: (agents: AgentDefinition[]) => void
+  anchorRect: DOMRect | null
 }
 
-const ROLE_OPTIONS: { value: AgentRole; label: string; icon: React.ReactNode; description: string }[] = [
-  { value: 'orchestrator', label: 'Orchestrator', icon: <UserCircle size={16} />, description: 'Coordinates other agents' },
-  { value: 'researcher', label: 'Researcher', icon: <MagnifyingGlass size={16} />, description: 'Read-only analysis' },
-  { value: 'implementer', label: 'Implementer', icon: <PencilSimple size={16} />, description: 'Writes code changes' },
-  { value: 'reviewer', label: 'Reviewer', icon: <Eye size={16} />, description: 'Read-only code review' },
-  { value: 'worker', label: 'Worker', icon: <Wrench size={16} />, description: 'General-purpose agent' },
+const ROLE_OPTIONS: { value: AgentRole; label: string; icon: React.ReactElement; desc: string }[] = [
+  { value: 'orchestrator', label: 'Orchestrator', icon: <UserCircle size={13} weight="bold" />, desc: 'Coordinates' },
+  { value: 'researcher', label: 'Researcher', icon: <MagnifyingGlass size={13} weight="bold" />, desc: 'Read-only' },
+  { value: 'implementer', label: 'Implementer', icon: <PencilSimple size={13} weight="bold" />, desc: 'Writes code' },
+  { value: 'reviewer', label: 'Reviewer', icon: <Eye size={13} weight="bold" />, desc: 'Reviews' },
+  { value: 'worker', label: 'Worker', icon: <Wrench size={13} weight="bold" />, desc: 'General' },
 ]
+
+function roleIcon(role: AgentRole): React.ReactElement {
+  return ROLE_OPTIONS.find((r) => r.value === role)?.icon ?? <Wrench size={13} />
+}
 
 function makeAgent(role: AgentRole = 'worker'): AgentDefinition {
   return {
@@ -26,13 +33,17 @@ function makeAgent(role: AgentRole = 'worker'): AgentDefinition {
   }
 }
 
-export function AgentConfigModal({ open, onClose, onConfirm }: Props) {
+export function AgentConfigModal({ open, onClose, onConfirm, anchorRect }: Props) {
   const colors = useColors()
+  const popoverLayer = usePopoverLayer()
+  const panelRef = useRef<HTMLDivElement>(null)
   const [agents, setAgents] = useState<AgentDefinition[]>([
     makeAgent('orchestrator'),
     makeAgent('researcher'),
     makeAgent('implementer'),
   ])
+  // Track which agent row has its role picker open
+  const [rolePickerFor, setRolePickerFor] = useState<string | null>(null)
 
   const addAgent = useCallback(() => {
     setAgents((prev) => [...prev, makeAgent('worker')])
@@ -51,58 +62,80 @@ export function AgentConfigModal({ open, onClose, onConfirm }: Props) {
     onConfirm(agents)
   }
 
+  // Click outside to close
+  useEffect(() => {
+    if (!open) return
+    const handle = (e: MouseEvent) => {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        onClose()
+      }
+    }
+    // Delay to avoid the opening click
+    const timer = setTimeout(() => document.addEventListener('mousedown', handle), 10)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('mousedown', handle)
+    }
+  }, [open, onClose])
+
+  // Escape to close
+  useEffect(() => {
+    if (!open) return
+    const handle = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handle)
+    return () => document.removeEventListener('keydown', handle)
+  }, [open, onClose])
+
   const orchestratorCount = agents.filter((a) => a.role === 'orchestrator').length
   const isValid = agents.length >= 2 && orchestratorCount === 1
 
-  return (
+  if (!popoverLayer || !anchorRect) return null
+
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.15 }}
+          data-clui-ui
+          ref={panelRef}
+          initial={{ opacity: 0, y: 8, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 8, scale: 0.97 }}
+          transition={{ duration: 0.15, ease: [0.4, 0, 0.1, 1] }}
           style={{
             position: 'fixed',
-            inset: 0,
-            zIndex: 1000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(0,0,0,0.5)',
-            backdropFilter: 'blur(4px)',
+            bottom: window.innerHeight - anchorRect.top + 6,
+            left: anchorRect.left,
+            width: Math.min(400, anchorRect.width),
+            pointerEvents: 'auto',
           }}
-          onClick={onClose}
         >
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            onClick={(e) => e.stopPropagation()}
+          <div
             style={{
-              width: 520,
-              maxHeight: '80vh',
-              background: colors.surfacePrimary,
-              border: `1px solid ${colors.containerBorder}`,
-              borderRadius: 12,
-              display: 'flex',
-              flexDirection: 'column',
+              background: colors.popoverBg,
+              backdropFilter: 'blur(20px)',
+              WebkitBackdropFilter: 'blur(20px)',
+              border: `1px solid ${colors.popoverBorder}`,
+              borderRadius: 14,
+              boxShadow: colors.popoverShadow,
               overflow: 'hidden',
             }}
           >
-            {/* Header */}
+            {/* Header — compact */}
             <div style={{
-              padding: '16px 20px',
+              padding: '10px 14px 8px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              borderBottom: `1px solid ${colors.containerBorder}`,
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Robot size={18} weight="bold" color={colors.accent} />
-                <span style={{ fontSize: 14, fontWeight: 600, color: colors.textPrimary }}>
-                  Configure Agents
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Robot size={14} weight="bold" color={colors.accent} />
+                <span style={{ fontSize: 12, fontWeight: 600, color: colors.textPrimary, letterSpacing: '0.01em' }}>
+                  Agents
+                </span>
+                <span style={{ fontSize: 11, color: colors.textTertiary, fontWeight: 400 }}>
+                  {agents.length} configured
                 </span>
               </div>
               <button
@@ -112,167 +145,291 @@ export function AgentConfigModal({ open, onClose, onConfirm }: Props) {
                   border: 'none',
                   cursor: 'pointer',
                   color: colors.textTertiary,
-                  padding: 4,
+                  padding: 2,
                   borderRadius: 4,
+                  display: 'flex',
+                  alignItems: 'center',
                 }}
               >
-                <X size={16} />
+                <X size={13} />
               </button>
             </div>
 
-            {/* Agent List */}
-            <div style={{ padding: '12px 20px', overflowY: 'auto', flex: 1 }}>
-              {agents.map((agent, idx) => (
-                <div
+            {/* Agent rows */}
+            <div style={{ padding: '0 6px 4px', maxHeight: 240, overflowY: 'auto' }}>
+              {agents.map((agent) => (
+                <AgentRow
                   key={agent.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 0',
-                    borderBottom: idx < agents.length - 1 ? `1px solid ${colors.containerBorder}` : undefined,
-                  }}
-                >
-                  {/* Name */}
-                  <input
-                    value={agent.name}
-                    onChange={(e) => updateAgent(agent.id, { name: e.target.value })}
-                    style={{
-                      flex: 1,
-                      background: colors.inputBg,
-                      border: `1px solid ${colors.containerBorder}`,
-                      borderRadius: 6,
-                      padding: '6px 10px',
-                      fontSize: 13,
-                      color: colors.textPrimary,
-                      outline: 'none',
-                      fontFamily: 'inherit',
-                    }}
-                    placeholder="Agent name"
-                  />
-
-                  {/* Role select */}
-                  <select
-                    value={agent.role}
-                    onChange={(e) => updateAgent(agent.id, { role: e.target.value as AgentRole })}
-                    style={{
-                      background: colors.inputBg,
-                      border: `1px solid ${colors.containerBorder}`,
-                      borderRadius: 6,
-                      padding: '6px 8px',
-                      fontSize: 12,
-                      color: colors.textPrimary,
-                      outline: 'none',
-                      cursor: 'pointer',
-                      fontFamily: 'inherit',
-                    }}
-                  >
-                    {ROLE_OPTIONS.map((r) => (
-                      <option key={r.value} value={r.value}>{r.label}</option>
-                    ))}
-                  </select>
-
-                  {/* Remove */}
-                  <button
-                    onClick={() => removeAgent(agent.id)}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: colors.textTertiary,
-                      padding: 4,
-                      borderRadius: 4,
-                      opacity: agents.length <= 2 ? 0.3 : 1,
-                    }}
-                    disabled={agents.length <= 2}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
+                  agent={agent}
+                  colors={colors}
+                  onUpdate={(updates) => updateAgent(agent.id, updates)}
+                  onRemove={() => removeAgent(agent.id)}
+                  canRemove={agents.length > 2}
+                  rolePickerOpen={rolePickerFor === agent.id}
+                  onToggleRolePicker={() => setRolePickerFor(rolePickerFor === agent.id ? null : agent.id)}
+                  onCloseRolePicker={() => setRolePickerFor(null)}
+                />
               ))}
 
-              {/* Add agent button */}
+              {/* Add agent */}
               <button
                 onClick={addAgent}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 6,
-                  marginTop: 8,
-                  padding: '6px 12px',
+                  gap: 5,
+                  margin: '2px 8px 4px',
+                  padding: '5px 10px',
                   background: 'none',
-                  border: `1px dashed ${colors.containerBorder}`,
-                  borderRadius: 6,
+                  border: 'none',
+                  borderRadius: 8,
                   cursor: 'pointer',
                   color: colors.textTertiary,
-                  fontSize: 12,
-                  fontFamily: 'inherit',
-                  width: '100%',
-                  justifyContent: 'center',
-                }}
-              >
-                <Plus size={12} />
-                Add Agent
-              </button>
-
-              {/* Validation message */}
-              {!isValid && agents.length > 0 && (
-                <div style={{
-                  marginTop: 8,
                   fontSize: 11,
-                  color: colors.statusError,
-                }}>
-                  {orchestratorCount === 0 && 'One agent must have the Orchestrator role.'}
-                  {orchestratorCount > 1 && 'Only one Orchestrator is allowed.'}
-                  {agents.length < 2 && 'At least 2 agents are required.'}
-                </div>
-              )}
+                  fontFamily: 'inherit',
+                  width: 'calc(100% - 16px)',
+                  transition: 'color 0.1s',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = colors.accent }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = colors.textTertiary }}
+              >
+                <Plus size={11} weight="bold" />
+                Add agent
+              </button>
             </div>
 
-            {/* Footer */}
+            {/* Validation + action row */}
             <div style={{
-              padding: '12px 20px',
+              padding: '6px 14px 10px',
               display: 'flex',
-              justifyContent: 'flex-end',
-              gap: 8,
-              borderTop: `1px solid ${colors.containerBorder}`,
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderTop: `1px solid ${colors.popoverBorder}`,
             }}>
-              <button
-                onClick={onClose}
-                style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
-                  border: `1px solid ${colors.containerBorder}`,
-                  background: 'none',
-                  color: colors.textPrimary,
-                  fontSize: 12,
-                  cursor: 'pointer',
-                  fontFamily: 'inherit',
-                }}
-              >
-                Cancel
-              </button>
+              <div style={{ fontSize: 10, color: colors.statusError, minHeight: 14 }}>
+                {!isValid && orchestratorCount === 0 && 'Need one Orchestrator'}
+                {!isValid && orchestratorCount > 1 && 'Only one Orchestrator allowed'}
+                {!isValid && agents.length < 2 && orchestratorCount === 1 && 'Need at least 2 agents'}
+              </div>
               <button
                 onClick={handleConfirm}
                 disabled={!isValid}
                 style={{
-                  padding: '6px 16px',
-                  borderRadius: 6,
+                  padding: '5px 14px',
+                  borderRadius: 8,
                   border: 'none',
-                  background: isValid ? colors.accent : colors.containerBorder,
+                  background: isValid ? colors.accent : colors.surfaceHover,
                   color: isValid ? '#fff' : colors.textTertiary,
-                  fontSize: 12,
+                  fontSize: 11,
                   cursor: isValid ? 'pointer' : 'not-allowed',
                   fontWeight: 600,
                   fontFamily: 'inherit',
+                  transition: 'background 0.15s, opacity 0.15s',
+                  opacity: isValid ? 1 : 0.5,
                 }}
               >
-                Start Orchestration
+                Start
               </button>
             </div>
-          </motion.div>
+          </div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    popoverLayer,
+  )
+}
+
+/* ── Agent Row ─────────────────────────────────────── */
+
+interface AgentRowProps {
+  agent: AgentDefinition
+  colors: ReturnType<typeof useColors>
+  onUpdate: (updates: Partial<AgentDefinition>) => void
+  onRemove: () => void
+  canRemove: boolean
+  rolePickerOpen: boolean
+  onToggleRolePicker: () => void
+  onCloseRolePicker: () => void
+}
+
+function AgentRow({ agent, colors, onUpdate, onRemove, canRemove, rolePickerOpen, onToggleRolePicker, onCloseRolePicker }: AgentRowProps) {
+  const rowRef = useRef<HTMLDivElement>(null)
+  const [nameEditing, setNameEditing] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Focus input on edit
+  useEffect(() => {
+    if (nameEditing) inputRef.current?.focus()
+  }, [nameEditing])
+
+  const roleOpt = ROLE_OPTIONS.find((r) => r.value === agent.role)!
+
+  return (
+    <div
+      ref={rowRef}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 8px',
+        borderRadius: 8,
+        position: 'relative',
+        transition: 'background 0.1s',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = colors.surfaceHover }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+    >
+      {/* Role icon + picker trigger */}
+      <div style={{ position: 'relative' }}>
+        <button
+          onClick={onToggleRolePicker}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 3,
+            padding: '4px 6px',
+            background: colors.surfaceHover,
+            border: `1px solid ${rolePickerOpen ? colors.accent : 'transparent'}`,
+            borderRadius: 6,
+            cursor: 'pointer',
+            color: colors.accent,
+            fontSize: 11,
+            fontFamily: 'inherit',
+            transition: 'border-color 0.1s',
+          }}
+          title={`Role: ${roleOpt.label}`}
+        >
+          {roleIcon(agent.role)}
+          <CaretDown size={9} weight="bold" style={{ opacity: 0.5 }} />
+        </button>
+
+        {/* Inline role picker dropdown */}
+        <AnimatePresence>
+          {rolePickerOpen && (
+            <motion.div
+              data-clui-ui
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.1 }}
+              style={{
+                position: 'absolute',
+                top: '100%',
+                left: 0,
+                marginTop: 2,
+                zIndex: 10,
+                background: colors.popoverBg,
+                backdropFilter: 'blur(16px)',
+                border: `1px solid ${colors.popoverBorder}`,
+                borderRadius: 8,
+                boxShadow: colors.popoverShadow,
+                overflow: 'hidden',
+                minWidth: 140,
+              }}
+            >
+              {ROLE_OPTIONS.map((r) => (
+                <button
+                  key={r.value}
+                  onClick={() => {
+                    onUpdate({ role: r.value, name: agent.name === roleOpt.label ? r.label : agent.name })
+                    onCloseRolePicker()
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    width: '100%',
+                    padding: '5px 10px',
+                    background: r.value === agent.role ? colors.accentLight : 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: r.value === agent.role ? colors.accent : colors.textPrimary,
+                    fontSize: 11,
+                    fontFamily: 'inherit',
+                    textAlign: 'left',
+                    transition: 'background 0.1s',
+                  }}
+                  onMouseEnter={(e) => { if (r.value !== agent.role) e.currentTarget.style.background = colors.surfaceHover }}
+                  onMouseLeave={(e) => { if (r.value !== agent.role) e.currentTarget.style.background = 'transparent' }}
+                >
+                  <span style={{ color: r.value === agent.role ? colors.accent : colors.textTertiary, display: 'flex' }}>
+                    {r.icon}
+                  </span>
+                  <span>{r.label}</span>
+                  <span style={{ color: colors.textTertiary, marginLeft: 'auto', fontSize: 10 }}>{r.desc}</span>
+                </button>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Name — inline editable */}
+      {nameEditing ? (
+        <input
+          ref={inputRef}
+          value={agent.name}
+          onChange={(e) => onUpdate({ name: e.target.value })}
+          onBlur={() => setNameEditing(false)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') setNameEditing(false) }}
+          style={{
+            flex: 1,
+            background: 'transparent',
+            border: 'none',
+            borderBottom: `1px solid ${colors.accent}`,
+            padding: '2px 0',
+            fontSize: 12,
+            color: colors.textPrimary,
+            outline: 'none',
+            fontFamily: 'inherit',
+          }}
+        />
+      ) : (
+        <span
+          onClick={() => setNameEditing(true)}
+          style={{
+            flex: 1,
+            fontSize: 12,
+            color: colors.textPrimary,
+            cursor: 'text',
+            padding: '2px 0',
+            borderBottom: '1px solid transparent',
+            transition: 'border-color 0.1s',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.borderBottomColor = colors.containerBorder }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderBottomColor = 'transparent' }}
+          title="Click to rename"
+        >
+          {agent.name}
+        </span>
+      )}
+
+      {/* Role label (subtle) */}
+      <span style={{ fontSize: 10, color: colors.textTertiary, whiteSpace: 'nowrap' }}>
+        {roleOpt.label}
+      </span>
+
+      {/* Remove */}
+      <button
+        onClick={onRemove}
+        style={{
+          background: 'none',
+          border: 'none',
+          cursor: canRemove ? 'pointer' : 'not-allowed',
+          color: colors.textTertiary,
+          padding: 2,
+          borderRadius: 4,
+          opacity: canRemove ? 0.4 : 0.15,
+          transition: 'opacity 0.1s',
+          display: 'flex',
+          alignItems: 'center',
+        }}
+        disabled={!canRemove}
+        onMouseEnter={(e) => { if (canRemove) e.currentTarget.style.opacity = '1' }}
+        onMouseLeave={(e) => { if (canRemove) e.currentTarget.style.opacity = '0.4' }}
+      >
+        <X size={12} />
+      </button>
+    </div>
   )
 }

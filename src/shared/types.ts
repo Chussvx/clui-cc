@@ -217,6 +217,14 @@ export interface TabState {
   agentStates: Record<string, AgentState>
   /** Which agent's messages are currently displayed in ConversationView */
   primaryAgentId: string | null
+  /** One-shot flag: next prompt should trigger orchestration analysis */
+  orchestrateNext: boolean
+  /** True while Haiku analysis is in flight */
+  orchAnalyzing: boolean
+  /** Prompt held during orchestration analysis (sent after approve/skip) */
+  pendingOrchPrompt: string | null
+  /** Active orchestration proposal awaiting user decision */
+  orchProposal: OrchestrationProposal | null
 }
 
 export interface Message {
@@ -241,7 +249,64 @@ export interface RunResult {
   model?: string
 }
 
-export type PanelType = 'terminal' | 'mcp' | 'cost' | 'prompts' | 'notifications' | null
+export type PanelType = 'terminal' | 'mcp' | 'cost' | 'prompts' | 'notifications' | 'visualizations' | 'memory' | null
+
+// ─── Inline Visualization Widgets ───
+
+export interface Widget {
+  id: string
+  /** ID of the message that contains this widget */
+  messageId: string
+  /** Title extracted from the code block or auto-generated */
+  title: string
+  /** 'html' for full HTML widgets, 'svg' for inline SVG */
+  kind: 'html' | 'svg'
+  /** Raw source code to render in iframe */
+  code: string
+  /** Timestamp for ordering in side list */
+  timestamp: number
+}
+
+// ─── Memory (CLAUDE.md + auto-memory) ───
+
+export interface MemoryEntry {
+  /** Filename relative to memory dir (e.g. 'feedback_testing.md') */
+  filename: string
+  /** Frontmatter name field */
+  name: string
+  /** Frontmatter description */
+  description: string
+  /** Frontmatter type */
+  memoryType: 'user' | 'feedback' | 'project' | 'reference' | 'unknown'
+  /** Full markdown body (after frontmatter) */
+  body: string
+}
+
+export interface MemoryListResult {
+  /** CLAUDE.md files found (project root + global) */
+  claudeMdFiles: Array<{ path: string; label: string; content: string }>
+  /** Auto-memory entries from memory/ dir */
+  memories: MemoryEntry[]
+  /** The encoded project path used */
+  projectDir: string
+}
+
+// ─── Constants ───
+
+/** Cost warning threshold for orchestration (USD) — shared between main and renderer */
+export const COST_WARNING_USD = 0.50
+
+// ─── Auto-Orchestration Proposal ───
+
+export interface OrchestrationProposal {
+  agents: Array<{
+    role: AgentRole
+    name: string
+    description: string
+  }>
+  reasoning: string
+  complexity: 'low' | 'medium' | 'high'
+}
 
 // ─── Canonical Events (normalized from raw stream) ───
 
@@ -262,6 +327,7 @@ export type NormalizedEvent =
   | { type: 'agent_status_change'; agentId: string; agentName: string; newStatus: AgentStatus; oldStatus: AgentStatus }
   | { type: 'agent_task_complete'; agentId: string; agentName: string; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string }
   | { type: 'orchestration_complete'; totalCostUsd: number; agentCosts: Record<string, number> }
+  | { type: 'orchestration_proposal'; proposal: OrchestrationProposal }
 
 // ─── Run Options ───
 
@@ -388,6 +454,10 @@ export const IPC = {
   ANIMATE_HEIGHT: 'clui:animate-height',
   LIST_SESSIONS: 'clui:list-sessions',
   LOAD_SESSION: 'clui:load-session',
+  MEMORY_LIST: 'clui:memory-list',
+  MEMORY_READ: 'clui:memory-read',
+  MEMORY_WRITE: 'clui:memory-write',
+  MEMORY_DELETE: 'clui:memory-delete',
 
   // One-way events (main → renderer)
   TEXT_CHUNK: 'clui:text-chunk',
@@ -428,6 +498,7 @@ export const IPC = {
   SET_PERMISSION_MODE: 'clui:set-permission-mode',
 
   // Orchestration mode (multi-agent)
+  ORCH_ANALYZE: 'clui:orch-analyze',
   ORCH_DEFINE_AGENTS: 'clui:orch-define-agents',
   ORCH_START: 'clui:orch-start',
   ORCH_CANCEL_AGENT: 'clui:orch-cancel-agent',

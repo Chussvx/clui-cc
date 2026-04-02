@@ -128,6 +128,55 @@ function callClaude(systemPrompt: string, userMessage: string): Promise<string> 
   })
 }
 
+// ─── Auto-Orchestration Analysis ───
+
+export interface OrchestrationAnalysis {
+  shouldOrchestrate: boolean
+  agents: Array<{ role: string; name: string; description: string }>
+  reasoning: string
+  complexity: 'low' | 'medium' | 'high'
+}
+
+export async function analyzeForOrchestration(prompt: string): Promise<{ analysis: OrchestrationAnalysis | null; error: string | null }> {
+  try {
+    const systemPrompt = `You are a task analysis expert. Given a user's prompt for an AI coding assistant, determine if the task would benefit from being split into multiple parallel agents.
+
+Return a JSON object with this exact structure:
+{
+  "shouldOrchestrate": true/false,
+  "agents": [
+    { "role": "orchestrator", "name": "Coordinator", "description": "Coordinates the other agents" },
+    { "role": "researcher", "name": "Researcher", "description": "What this agent does" },
+    { "role": "implementer", "name": "Implementer", "description": "What this agent does" }
+  ],
+  "reasoning": "Brief explanation of why this split helps",
+  "complexity": "low" | "medium" | "high"
+}
+
+Rules:
+- Only recommend orchestration when the task has 2+ clearly independent subtasks that benefit from parallelism
+- Always include exactly one "orchestrator" role agent
+- Valid roles: orchestrator, researcher, implementer, reviewer, worker
+- Keep agent count between 2-5 (including orchestrator)
+- For simple, sequential, or single-focus tasks, set shouldOrchestrate to false with empty agents array
+- Return ONLY the JSON object, no other text`
+
+    const raw = await callClaude(systemPrompt, `Analyze this task:\n\n${prompt}`)
+    log(`Orchestration analysis raw (${raw.length} chars): ${raw.substring(0, 300)}`)
+
+    const stripped = raw.replace(/```(?:json)?\s*/g, '').replace(/```\s*/g, '').trim()
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      log(`Failed to find JSON in orchestration analysis`)
+      return { analysis: null, error: 'Failed to parse analysis' }
+    }
+    const analysis: OrchestrationAnalysis = JSON.parse(jsonMatch[0])
+    return { analysis, error: null }
+  } catch (e: any) {
+    return { analysis: null, error: e.message }
+  }
+}
+
 export async function improvePrompt(prompt: string): Promise<{ improved: string; error: string | null }> {
   try {
     const systemPrompt = `You are a prompt engineering expert. Your job is to improve user prompts to be clearer, more specific, and more effective when sent to an AI coding assistant (Claude Code).

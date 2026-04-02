@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, AgentDefinition } from '../shared/types'
+import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, AgentDefinition, MemoryListResult } from '../shared/types'
 
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
@@ -30,11 +30,22 @@ export interface CluiAPI {
   listInstalledPlugins(): Promise<string[]>
   installPlugin(repo: string, pluginName: string, marketplace: string, sourcePath?: string, isSkillMd?: boolean): Promise<{ ok: boolean; error?: string }>
   uninstallPlugin(pluginName: string): Promise<{ ok: boolean; error?: string }>
+  // ─── Memory ───
+  memoryList(projectPath?: string): Promise<MemoryListResult>
+  memoryRead(projectPath: string, filename: string): Promise<string | null>
+  memoryWrite(projectPath: string, filename: string, content: string): Promise<{ ok: boolean; error?: string }>
+  memoryDelete(projectPath: string, filename: string): Promise<{ ok: boolean; error?: string }>
+
+  debugInjectWidget(tabId: string): Promise<{ success: boolean }>
+  openWidgetWindow(title: string, srcDoc: string): Promise<{ success: boolean }>
+  registerWidget(html: string): Promise<{ url: string }>
+
   setPermissionMode(mode: string): void
   getTheme(): Promise<{ isDark: boolean }>
   onThemeChange(callback: (isDark: boolean) => void): () => void
 
   // ─── Orchestration Mode ───
+  orchAnalyze(prompt: string): Promise<{ analysis: { shouldOrchestrate: boolean; agents: Array<{ role: string; name: string; description: string }>; reasoning: string; complexity: string } | null; error: string | null }>
   orchDefineAgents(tabId: string, agents: AgentDefinition[]): Promise<void>
   orchStart(tabId: string, prompt: string, projectPath: string): Promise<void>
   orchCancelAgent(tabId: string, agentId: string): Promise<boolean>
@@ -60,6 +71,8 @@ export interface CluiAPI {
   animateHeight(from: number, to: number, durationMs: number): Promise<void>
   hideWindow(): void
   isVisible(): Promise<boolean>
+  /** OS platform (darwin, win32, linux) */
+  platform: string
   /** OS-level click-through for transparent window regions */
   setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void
   /** Manual window drag for frameless windows */
@@ -106,6 +119,16 @@ const api: CluiAPI = {
     ipcRenderer.invoke(IPC.MARKETPLACE_INSTALL, { repo, pluginName, marketplace, sourcePath, isSkillMd }),
   uninstallPlugin: (pluginName) =>
     ipcRenderer.invoke(IPC.MARKETPLACE_UNINSTALL, { pluginName }),
+  // ─── Memory ───
+  memoryList: (projectPath?: string) => ipcRenderer.invoke(IPC.MEMORY_LIST, projectPath),
+  memoryRead: (projectPath, filename) => ipcRenderer.invoke(IPC.MEMORY_READ, { projectPath, filename }),
+  memoryWrite: (projectPath, filename, content) => ipcRenderer.invoke(IPC.MEMORY_WRITE, { projectPath, filename, content }),
+  memoryDelete: (projectPath, filename) => ipcRenderer.invoke(IPC.MEMORY_DELETE, { projectPath, filename }),
+
+  debugInjectWidget: (tabId) => ipcRenderer.invoke('clui:debug-inject-widget', tabId),
+  openWidgetWindow: (title, srcDoc) => ipcRenderer.invoke('clui:open-widget-window', { title, srcDoc }),
+  registerWidget: (html) => ipcRenderer.invoke('clui:register-widget', html),
+
   setPermissionMode: (mode) => ipcRenderer.send(IPC.SET_PERMISSION_MODE, mode),
   getTheme: () => ipcRenderer.invoke(IPC.GET_THEME),
   onThemeChange: (callback) => {
@@ -115,6 +138,8 @@ const api: CluiAPI = {
   },
 
   // ─── Orchestration Mode ───
+  orchAnalyze: (prompt) =>
+    ipcRenderer.invoke(IPC.ORCH_ANALYZE, prompt),
   orchDefineAgents: (tabId, agents) =>
     ipcRenderer.invoke(IPC.ORCH_DEFINE_AGENTS, { tabId, agents }),
   orchStart: (tabId, prompt, projectPath) =>
@@ -168,6 +193,7 @@ const api: CluiAPI = {
     ipcRenderer.send(IPC.START_WINDOW_DRAG, deltaX, deltaY),
   resetWindowPosition: () => ipcRenderer.send(IPC.RESET_WINDOW_POSITION),
   setWindowWidth: (width) => ipcRenderer.send(IPC.SET_WINDOW_WIDTH, width),
+  platform: process.platform,
 
   // ─── Event listeners ───
   onEvent: (callback) => {

@@ -1,13 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad, Robot } from '@phosphor-icons/react'
+import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad, Lightning } from '@phosphor-icons/react'
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
 import { PromptImprover } from './PromptImprover'
-import { AgentConfigModal } from './AgentConfigModal'
 import { useColors } from '../theme'
-import type { AgentDefinition } from '../../shared/types'
 
 const INPUT_MIN_HEIGHT = 20
 const INPUT_MAX_HEIGHT = 140
@@ -40,9 +38,8 @@ export function InputBar() {
   const addAttachments = useSessionStore((s) => s.addAttachments)
   const removeAttachment = useSessionStore((s) => s.removeAttachment)
 
-  const orchDefineAgents = useSessionStore((s) => s.orchDefineAgents)
-  const orchStart = useSessionStore((s) => s.orchStart)
-  const [agentModalOpen, setAgentModalOpen] = useState(false)
+  const toggleOrchestrate = useSessionStore((s) => s.toggleOrchestrate)
+  const orchAnalyzeAndPropose = useSessionStore((s) => s.orchAnalyzeAndPropose)
 
   const planMode = useSessionStore((s) => s.planMode)
   const togglePlanMode = useSessionStore((s) => s.togglePlanMode)
@@ -53,12 +50,8 @@ export function InputBar() {
   const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
   const colors = useColors()
 
-  const handleAgentConfirm = useCallback(async (agents: AgentDefinition[]) => {
-    setAgentModalOpen(false)
-    if (!activeTabId) return
-    await orchDefineAgents(activeTabId, agents)
-    addSystemMessage(`Orchestration configured with ${agents.length} agents. Type your prompt to start.`)
-  }, [activeTabId, orchDefineAgents, addSystemMessage])
+  const orchestrateNext = tab?.orchestrateNext || false
+  const orchAnalyzing = tab?.orchAnalyzing || false
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isConnecting = tab?.status === 'connecting'
   const hasContent = input.trim().length > 0 || (tab?.attachments?.length ?? 0) > 0
@@ -293,15 +286,15 @@ export function InputBar() {
     if (textareaRef.current) {
       textareaRef.current.style.height = `${INPUT_MIN_HEIGHT}px`
     }
-    // Route to orchestration or single-agent mode
-    if (tab?.orchestrationMode === 'multi' && tab.agentDefinitions.length > 0) {
-      orchStart(prompt || 'See attached files', tab.workingDirectory || '')
+    // Route: orchestrate toggle → pre-flight analysis, otherwise normal send
+    if (orchestrateNext) {
+      orchAnalyzeAndPropose(prompt || 'See attached files', tab?.workingDirectory || '')
     } else {
       sendMessage(prompt || 'See attached files')
     }
     // Refocus after React re-renders from the state update
     requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [input, isBusy, sendMessage, orchStart, tab?.orchestrationMode, tab?.agentDefinitions, tab?.workingDirectory, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect])
+  }, [input, isBusy, sendMessage, orchAnalyzeAndPropose, orchestrateNext, tab?.workingDirectory, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect])
 
   // ─── Keyboard ───
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -457,15 +450,16 @@ export function InputBar() {
             <div className="flex items-center justify-end gap-1" style={{ marginTop: 0, paddingBottom: 4 }}>
               <button
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setAgentModalOpen(true)}
-                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                onClick={toggleOrchestrate}
+                disabled={orchAnalyzing || isBusy}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
                 style={{
-                  background: tab?.orchestrationMode === 'multi' ? colors.accent : colors.surfaceHover,
-                  color: tab?.orchestrationMode === 'multi' ? colors.textOnAccent : colors.textTertiary,
+                  background: orchestrateNext ? colors.accent : colors.surfaceHover,
+                  color: orchestrateNext ? colors.textOnAccent : colors.textTertiary,
                 }}
-                title={tab?.orchestrationMode === 'multi' ? 'Multi-agent mode active' : 'Configure multi-agent orchestration'}
+                title={orchAnalyzing ? 'Analyzing...' : orchestrateNext ? 'Orchestrate mode — click to disable' : 'Enable multi-agent orchestration for next message'}
               >
-                <Robot size={16} />
+                <Lightning size={16} weight={orchestrateNext ? 'fill' : 'regular'} />
               </button>
               <button
                 onMouseDown={(e) => e.preventDefault()}
@@ -541,15 +535,16 @@ export function InputBar() {
             <div className="flex items-center gap-1 shrink-0 ml-2">
               <button
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={() => setAgentModalOpen(true)}
-                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
+                onClick={toggleOrchestrate}
+                disabled={orchAnalyzing || isBusy}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
                 style={{
-                  background: tab?.orchestrationMode === 'multi' ? colors.accent : colors.surfaceHover,
-                  color: tab?.orchestrationMode === 'multi' ? colors.textOnAccent : colors.textTertiary,
+                  background: orchestrateNext ? colors.accent : colors.surfaceHover,
+                  color: orchestrateNext ? colors.textOnAccent : colors.textTertiary,
                 }}
-                title={tab?.orchestrationMode === 'multi' ? 'Multi-agent mode active' : 'Configure multi-agent orchestration'}
+                title={orchAnalyzing ? 'Analyzing...' : orchestrateNext ? 'Orchestrate mode — click to disable' : 'Enable multi-agent orchestration for next message'}
               >
-                <Robot size={16} />
+                <Lightning size={16} weight={orchestrateNext ? 'fill' : 'regular'} />
               </button>
               <button
                 onMouseDown={(e) => e.preventDefault()}
@@ -606,11 +601,6 @@ export function InputBar() {
         visible={input.trim().length > 0 && voiceState === 'idle' && !showSlashMenu && !isBusy}
       />
 
-      <AgentConfigModal
-        open={agentModalOpen}
-        onClose={() => setAgentModalOpen(false)}
-        onConfirm={handleAgentConfirm}
-      />
     </div>
   )
 }

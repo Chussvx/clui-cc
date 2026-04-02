@@ -2,6 +2,7 @@ import { spawn, execSync, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
 import { join, dirname, delimiter } from 'path'
+import { readFile } from 'fs/promises'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
@@ -30,6 +31,71 @@ const CLUI_SYSTEM_HINT = [
   '- Do not ask whether CLUI can render images; assume it can.',
   '- Use tables, bold, headers, and bullet lists freely — they all render beautifully.',
   '- Use code blocks with language tags for syntax highlighting.',
+  '',
+  'VISUALIZATION CAPABILITY:',
+  'CLUI renders HTML/SVG visualizations INLINE in the chat — like Claude.ai artifacts.',
+  'When the user asks to "visualize", "show", "chart", "diagram", "graph", or "bar chart" something:',
+  '- ALWAYS create visualizations as a fenced ```html code block directly in your response.',
+  '  This is the ONLY reliable method. CLUI detects ```html blocks and renders them inline.',
+  '- NEVER use MCP visualization tools (Three.js 3D Viewer, Mermaid Chart, etc.) for charts.',
+  '  They render externally and the user cannot see them in CLUI.',
+  '- NEVER use Python (matplotlib, plotly, etc.) for visualizations — CLUI cannot display them.',
+  '- NEVER tell the user to "open the file" or "run the script". CLUI renders it inline.',
+  '- Self-contained: ALL CSS and JS must be inline. No external CDN links or imports.',
+  '- Include a <title> tag — CLUI uses it as the widget label.',
+  '',
+  'FRONTEND CRAFT — write production-quality HTML/CSS/JS:',
+  '- Layout: Use CSS Grid and Flexbox properly. No absolute positioning hacks. Use gap, not margin tricks.',
+  '- Typography: Use a proper font stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif.',
+  '  Set line-height (1.4-1.6 for body text), letter-spacing where appropriate. Use rem/em, not fixed px for text.',
+  '- Color: Use CSS custom properties (--bg, --fg, --accent). Build from a cohesive palette, not random hex.',
+  '  Use HSL for derived shades (e.g. hover states). Ensure WCAG AA contrast (4.5:1 for text).',
+  '- Spacing: Use a consistent scale (4/8/12/16/24/32px). Padding and margin should feel rhythmic, not arbitrary.',
+  '- Borders & Radius: Subtle borders (1px solid with low-opacity color). Rounded corners 6-12px for cards, 4-6px for buttons.',
+  '- Shadows: Layered box-shadows for depth: a tight one for definition + a soft spread for elevation.',
+  '  Example: box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.08);',
+  '- Transitions: ALWAYS animate state changes. Use transition: 0.2-0.4s with proper easing (ease-out for enters, ease-in for exits).',
+  '  Animate height, opacity, transform, background-color. Use cubic-bezier(.4,0,.2,1) for smooth motion.',
+  '- Hover/Focus states: Every interactive element MUST have visible hover and focus states.',
+  '  Buttons: slight translateY(-1px) + shadow lift. Links: underline or color shift. Cards: shadow elevation change.',
+  '- Responsive: Use %, vw, min()/max()/clamp() for sizing. Never hardcode widths that break small containers.',
+  '- Canvas/SVG: Use <canvas> for data-heavy charts, inline <svg> for icons/simple graphics. Both render beautifully.',
+  '',
+  'INTERACTIVITY — every visualization must be a MINI APP:',
+  '- Add control buttons (Randomize, Sort, Filter, Toggle) styled to match the theme.',
+  '  Button recipe: background var(--accent), color #fff, border none, padding 8px 20px,',
+  '  border-radius 8px, font-weight 600, cursor pointer, transition transform 0.15s.',
+  '  Hover: translateY(-1px) + box-shadow. Active: scale(0.97).',
+  '- Animate data changes: transition bar heights, morph shapes, fade in/out elements.',
+  '  Use CSS transitions on height/width/opacity/transform. Use requestAnimationFrame for canvas.',
+  '- Hover effects on data: tooltips showing exact values, highlight on mouseover, cursor pointer.',
+  '- Click interactions: click a bar to highlight it, click a slice to isolate it, click headers to sort.',
+  '- State management: use plain JS variables or closures. No frameworks needed.',
+  '  Keep state minimal: one data array, one render function, event handlers that update + re-render.',
+  '',
+  'ANTI-SLOP — write code like a craftsman, not a template engine:',
+  '- NO generic placeholder text: "Lorem ipsum", "Your Title Here", "Description goes here". Use real or realistic data.',
+  '- NO meaningless comments: "// Initialize variables", "// Create element", "// Set styles". Only comment non-obvious logic.',
+  '- NO unnecessary wrapper divs. Use semantic HTML: section, article, header, nav, main, footer.',
+  '- NO copy-paste patterns with trivial variations. Use loops, arrays, and functions to generate repetitive structures.',
+  '- NO bloated CSS: if you write the same property 3+ times, extract it into a class or CSS variable.',
+  '- NO lazy color choices: avoid pure #000/#fff, avoid default blue (#0000ff). Use considered colors from a palette.',
+  '- NO "display: block; width: 100%;" on block elements (already default). No redundant resets.',
+  '- NO over-engineering: skip data fetching wrappers, error boundaries, or config objects for a single-page widget.',
+  '  Write the simplest code that creates the richest experience.',
+  '- ALWAYS handle edge cases visually: empty states, zero values (don\'t divide by zero), single data points.',
+  '- ALWAYS use consistent naming: camelCase for JS, kebab-case for CSS classes, descriptive but concise.',
+  '- Aim for the quality level of a polished CodePen or Dribbble shot — something worth sharing.',
+  '',
+  'BACKEND & GENERAL CODING:',
+  '- Write clean, idiomatic code in whatever language the project uses. Match existing conventions.',
+  '- Functions should do one thing. Name them for what they return or accomplish, not how.',
+  '- Error handling: validate at boundaries (user input, API calls, file I/O). Don\'t defensively code pure functions.',
+  '- No premature abstraction. Three similar lines > one clever helper used once.',
+  '- Prefer composition over inheritance. Prefer data transforms over mutation.',
+  '- When modifying existing code: read it first, understand the patterns, then extend — don\'t rewrite.',
+  '- Git commits: atomic, descriptive, one logical change per commit.',
+  '- Tests: test behavior not implementation. One assertion per concept. Use realistic fixtures.',
   '',
   'You are still a software engineering assistant. Keep using your tools (Read, Edit, Bash, etc.)',
   'normally. But when presenting information, links, resources, or explanations to the user,',
@@ -255,6 +321,21 @@ export class RunManager extends EventEmitter {
     // ─── stdout → NDJSON parser → normalizer → events ───
     const parser = StreamParser.fromStream(child.stdout!)
 
+    // ─── Widget intercept: capture Write tool calls for .html/.svg files ───
+    // When Claude uses Write to create an HTML/SVG file, we inject a synthetic
+    // text_chunk with the content as a fenced code block so the renderer's
+    // widget detection picks it up and shows an inline preview.
+    //
+    // Three interception paths (ordered by reliability):
+    //  Path A: permission_request — has full tool.input, fires for hook-based perms
+    //  Path B: assistant event — has complete tool inputs, fires after response
+    //  Path C: filesystem fallback — reads file from disk after result event
+    //
+    // All paths dedup via injectedWidgets set keyed by file path.
+    const injectedWidgets = new Set<string>()
+    /** Tracks .html/.svg file paths from Write calls for filesystem fallback */
+    const pendingWritePaths: string[] = []
+
     parser.on('event', (raw: ClaudeEvent) => {
       // Track session ID
       if (raw.type === 'system' && 'subtype' in raw && raw.subtype === 'init') {
@@ -285,6 +366,38 @@ export class RunManager extends EventEmitter {
       // Emit raw event for debugging
       this.emit('raw', requestId, raw)
 
+      // ─── Path A: permission_request interception ───
+      // Most reliable: the CLI always sends the full tool input in permission_request
+      // so the user can review what's being written. We intercept it here.
+      if (raw.type === 'permission_request') {
+        const tool = (raw as any).tool
+        if (tool?.name && tool?.input) {
+          const name = String(tool.name)
+          if (/^(Write|Edit|write_to_file|create_file)$/i.test(name)) {
+            log(`Widget Path A: permission_request for "${name}"`)
+            this._tryInjectWidget(requestId, JSON.stringify(tool.input), injectedWidgets, pendingWritePaths)
+          }
+        }
+      }
+
+      // ─── Path B: complete assistant event ───
+      // Backup: the assembled assistant event has full tool_use blocks with input.
+      // Fires for auto-approved tools that skip the permission_request flow.
+      if (raw.type === 'assistant') {
+        const msg = (raw as any).message
+        if (msg?.content && Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === 'tool_use' && block.input) {
+              const name = block.name || ''
+              if (/^(Write|Edit|write_to_file|create_file)$/i.test(name)) {
+                log(`Widget Path B: assistant tool_use "${name}"`)
+                this._tryInjectWidget(requestId, JSON.stringify(block.input), injectedWidgets, pendingWritePaths)
+              }
+            }
+          }
+        }
+      }
+
       // Normalize and emit canonical events
       const normalized = normalize(raw)
       for (const evt of normalized) {
@@ -292,10 +405,24 @@ export class RunManager extends EventEmitter {
         this.emit('normalized', requestId, evt)
       }
 
-      // Close stdin after result event — with stream-json input the process
-      // stays alive waiting for more input; closing stdin triggers clean exit.
+      // ─── Path C: filesystem fallback on result event ───
+      // Ultimate fallback: after the run completes, check if any tracked .html/.svg
+      // files exist on disk and read their content. This catches cases where neither
+      // Path A nor Path B had the content (e.g., permission auto-approved, no assistant event input).
       if (raw.type === 'result') {
         log(`Run complete [${requestId}]: sawPermissionRequest=${handle.sawPermissionRequest}, denials=${handle.permissionDenials.length}`)
+
+        // Check filesystem for any .html/.svg files that weren't injected yet
+        if (pendingWritePaths.length > 0) {
+          const pathsToCheck = pendingWritePaths.filter((p) => !injectedWidgets.has(p))
+          if (pathsToCheck.length > 0) {
+            log(`Widget Path C: checking ${pathsToCheck.length} files on disk`)
+            for (const filePath of pathsToCheck) {
+              this._tryReadAndInjectWidget(requestId, filePath, injectedWidgets)
+            }
+          }
+        }
+
         try { child.stdin?.end() } catch {}
       }
     })
@@ -380,24 +507,37 @@ export class RunManager extends EventEmitter {
   }
 
   /**
-   * Cancel a running process: SIGINT, then SIGKILL after 5s.
+   * Cancel a running process.
+   * Windows: taskkill /F /T to kill the entire process tree immediately
+   *   (SIGINT doesn't propagate through cmd.exe shell wrappers on Windows).
+   * Unix: SIGINT first, SIGKILL fallback after 3s.
    */
   cancel(requestId: string): boolean {
     const handle = this.activeRuns.get(requestId)
     if (!handle) return false
 
-    log(`Cancelling run ${requestId}`)
-    handle.process.kill('SIGINT')
+    const pid = handle.process.pid
+    log(`Cancelling run ${requestId} (pid=${pid})`)
 
-    // Fallback: SIGKILL if process hasn't exited after 5s.
-    // Only check exitCode — process.killed is set true by the SIGINT call above,
-    // so checking !killed would prevent the fallback from ever firing.
-    setTimeout(() => {
-      if (handle.process.exitCode === null) {
-        log(`Force killing run ${requestId} (SIGINT did not terminate)`)
+    if (IS_WIN && pid) {
+      // Kill the entire process tree — works reliably on Windows
+      try {
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' })
+      } catch {
+        // Process may have already exited
         handle.process.kill('SIGKILL')
       }
-    }, 5000)
+    } else {
+      handle.process.kill('SIGINT')
+
+      // Fallback: SIGKILL if process hasn't exited after 3s.
+      setTimeout(() => {
+        if (handle.process.exitCode === null) {
+          log(`Force killing run ${requestId} (SIGINT did not terminate)`)
+          handle.process.kill('SIGKILL')
+        }
+      }, 3000)
+    }
 
     return true
   }
@@ -429,6 +569,93 @@ export class RunManager extends EventEmitter {
 
   getActiveRunIds(): string[] {
     return Array.from(this.activeRuns.keys())
+  }
+
+  /**
+   * Widget intercept: if a Write/Edit tool call targeted an .html/.svg file,
+   * inject a synthetic text_chunk with the content as a fenced code block.
+   * Deduplicates by file path so the same widget isn't injected twice.
+   */
+  private _tryInjectWidget(
+    requestId: string,
+    jsonStr: string,
+    injectedWidgets: Set<string>,
+    pendingWritePaths: string[],
+  ): void {
+    try {
+      const input = JSON.parse(jsonStr)
+
+      // Handle various field naming conventions across Claude tool schemas
+      const filePath: string = input.file_path || input.filePath || input.path || ''
+      const content: string = input.content || input.new_string || input.text || ''
+
+      log(`Widget intercept [${requestId}]: parsed input — file="${filePath}", contentLen=${content.length}, keys=${Object.keys(input).join(',')}`)
+
+      if (!filePath) return
+
+      const lower = filePath.toLowerCase()
+      let kind: 'html' | 'svg' | null = null
+      if (lower.endsWith('.html') || lower.endsWith('.htm')) kind = 'html'
+      else if (lower.endsWith('.svg')) kind = 'svg'
+
+      if (!kind) return
+
+      // Track file path for filesystem fallback (even if content is missing now)
+      if (!pendingWritePaths.includes(filePath)) {
+        pendingWritePaths.push(filePath)
+      }
+
+      if (!content || content.length < 80) {
+        log(`Widget intercept [${requestId}]: no content or too short — deferring to Path C (filesystem)`)
+        return
+      }
+
+      // Dedup: skip if already injected for this file path
+      if (injectedWidgets.has(filePath)) {
+        log(`Widget intercept [${requestId}]: already injected for ${filePath}, skipping`)
+        return
+      }
+      injectedWidgets.add(filePath)
+
+      log(`Widget intercept [${requestId}]: injecting ${kind} widget from ${filePath} (${content.length} chars)`)
+
+      // Emit a synthetic text_chunk with the content as a fenced code block
+      const syntheticText = `\n\n\`\`\`${kind}\n${content}\n\`\`\`\n`
+      this.emit('normalized', requestId, { type: 'text_chunk', text: syntheticText })
+    } catch (err) {
+      log(`Widget intercept [${requestId}]: JSON parse failed — ${(err as Error).message?.substring(0, 100)}`)
+    }
+  }
+
+  /**
+   * Filesystem fallback (Path C): read an .html/.svg file from disk and inject it.
+   * Called after the run completes for any files that weren't caught by Path A/B.
+   */
+  private async _tryReadAndInjectWidget(
+    requestId: string,
+    filePath: string,
+    injectedWidgets: Set<string>,
+  ): Promise<void> {
+    if (injectedWidgets.has(filePath)) return
+
+    const lower = filePath.toLowerCase()
+    let kind: 'html' | 'svg' | null = null
+    if (lower.endsWith('.html') || lower.endsWith('.htm')) kind = 'html'
+    else if (lower.endsWith('.svg')) kind = 'svg'
+    if (!kind) return
+
+    try {
+      const content = await readFile(filePath, 'utf-8')
+      if (content.length < 80) return
+
+      injectedWidgets.add(filePath)
+      log(`Widget Path C [${requestId}]: read ${kind} from disk: ${filePath} (${content.length} chars)`)
+
+      const syntheticText = `\n\n\`\`\`${kind}\n${content}\n\`\`\`\n`
+      this.emit('normalized', requestId, { type: 'text_chunk', text: syntheticText })
+    } catch (err) {
+      log(`Widget Path C [${requestId}]: failed to read ${filePath} — ${(err as Error).message?.substring(0, 80)}`)
+    }
   }
 
   private _ringPush(buffer: string[], line: string): void {

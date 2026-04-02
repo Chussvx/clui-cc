@@ -8,8 +8,12 @@ import { StatusBar } from './components/StatusBar'
 import { MarketplacePanel } from './components/MarketplacePanel'
 import { NotificationPanel } from './components/NotificationPanel'
 import { CostDashboardPanel } from './components/CostDashboardPanel'
+import { VisualizationPanel } from './components/VisualizationPanel'
+import { MemoryPanel } from './components/MemoryPanel'
+import { WidgetPopup } from './components/WidgetBlock'
 import { TerminalPanel } from './components/TerminalPanel'
 import { PopoverLayerProvider } from './components/PopoverLayer'
+import { ToastLayer } from './components/ToastLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore } from './stores/sessionStore'
@@ -60,6 +64,26 @@ export default function App() {
     })
   }, [])
 
+  // ─── Debug: Ctrl+Shift+W injects a test widget into the active tab ───
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === 'W') {
+        e.preventDefault()
+        const tabId = useSessionStore.getState().activeTabId
+        if (tabId) {
+          console.log('[DEBUG] Injecting test widget into tab', tabId)
+          window.clui.debugInjectWidget(tabId).then((r) => {
+            console.log('[DEBUG] Widget inject result:', r)
+          }).catch((err) => {
+            console.error('[DEBUG] Widget inject failed:', err)
+          })
+        }
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   // Shared drag ref — must be declared before the setIgnoreMouseEvents effect so both closures can read it
   const dragRef = useRef<{ startX: number; startY: number } | null>(null)
 
@@ -71,7 +95,8 @@ export default function App() {
   const windowYRef = useRef(initialWindowY)
   const cardYRef = useRef(0) // CSS translateY offset (only used after window hits its y constraint)
 
-  // OS-level click-through (RAF-throttled to avoid per-pixel IPC)
+  // OS-level click-through — transparent areas pass clicks to desktop.
+  // Renderer toggles ignore on/off as cursor moves between UI and transparent regions.
   useEffect(() => {
     if (!window.clui?.setIgnoreMouseEvents) return
     let lastIgnored: boolean | null = null
@@ -117,6 +142,8 @@ export default function App() {
       // Skip interactive elements — everything else on the card is draggable
       if (el.closest('button, input, textarea, a, select, [role="button"], [contenteditable], .cm-editor')) return
       if (!el.closest('[data-clui-ui]')) return
+      // Don't drag from widget popup or its backdrop
+      if (el.closest('[data-widget-popup]')) return
       e.preventDefault()
       // Double-click: snap back to default position
       if (e.detail >= 2) {
@@ -216,6 +243,8 @@ export default function App() {
 
   return (
     <PopoverLayerProvider>
+      <ToastLayer />
+      <WidgetPopup />
       <div className="flex flex-col justify-end h-full" style={{ background: 'transparent' }}>
 
         {/* ─── 460px content column, centered. Circles overflow left. ─── */}
@@ -283,34 +312,52 @@ export default function App() {
             )}
           </AnimatePresence>
 
-          {/* ─── Notification / Cost panels ─── */}
+          {/* ─── Notification / Cost / Visualizations panels ─── */}
           <AnimatePresence>
-            {(activePanel === 'notifications' || activePanel === 'cost') && (
-              <div
-                data-clui-ui
-                style={{
-                  width: 720,
-                  maxWidth: 720,
-                  marginLeft: '50%',
-                  transform: 'translateX(-50%)',
-                  marginBottom: 14,
-                  position: 'relative',
-                  zIndex: 30,
-                }}
-              >
+            {(activePanel === 'notifications' || activePanel === 'cost' || activePanel === 'visualizations' || activePanel === 'memory') && (
+              <>
+                {/* Invisible backdrop — click to close */}
                 <div
                   data-clui-ui
-                  className="glass-surface overflow-hidden no-drag"
-                  style={{ borderRadius: 24, maxHeight: 470 }}
+                  onClick={() => togglePanel(activePanel!)}
+                  style={{
+                    position: 'fixed',
+                    inset: 0,
+                    zIndex: 29,
+                  }}
+                />
+                <div
+                  data-clui-ui
+                  style={{
+                    width: 720,
+                    maxWidth: 720,
+                    marginLeft: '50%',
+                    transform: 'translateX(-50%)',
+                    marginBottom: 14,
+                    position: 'relative',
+                    zIndex: 30,
+                  }}
                 >
-                  {activePanel === 'notifications' && (
-                    <NotificationPanel onClose={() => togglePanel('notifications')} />
-                  )}
-                  {activePanel === 'cost' && (
-                    <CostDashboardPanel onClose={() => togglePanel('cost')} />
-                  )}
+                  <div
+                    data-clui-ui
+                    className="glass-surface overflow-hidden no-drag"
+                    style={{ borderRadius: 24, maxHeight: 470 }}
+                  >
+                    {activePanel === 'notifications' && (
+                      <NotificationPanel onClose={() => togglePanel('notifications')} />
+                    )}
+                    {activePanel === 'cost' && (
+                      <CostDashboardPanel onClose={() => togglePanel('cost')} />
+                    )}
+                    {activePanel === 'visualizations' && (
+                      <VisualizationPanel onClose={() => togglePanel('visualizations')} />
+                    )}
+                    {activePanel === 'memory' && (
+                      <MemoryPanel onClose={() => togglePanel('memory')} />
+                    )}
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </AnimatePresence>
 

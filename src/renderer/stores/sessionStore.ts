@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType, AgentDefinition, AgentState, AgentStatus } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType, AgentDefinition, AgentState, AgentStatus, OrchestrationProposal, AgentRole } from '../../shared/types'
+import { COST_WARNING_USD } from '../../shared/types'
 import { useThemeStore } from '../theme'
 import { useNotificationStore } from './notificationStore'
 import notificationSrc from '../../../resources/notification.mp3'
@@ -138,6 +139,13 @@ interface State {
   orchCancelAll: () => void
   orchRespondPermission: (agentId: string, questionId: string, optionId: string) => void
   handleAgentEvent: (tabId: string, agentId: string, event: NormalizedEvent) => void
+
+  // Auto-orchestration actions
+  toggleOrchestrate: () => void
+  orchAnalyzeAndPropose: (prompt: string, projectPath: string) => Promise<void>
+  orchApproveProposal: () => Promise<void>
+  orchEditProposal: (agents: Array<{ role: AgentRole; name: string; description: string }>) => Promise<void>
+  orchDismissProposal: () => void
 }
 
 let msgCounter = 0
@@ -185,6 +193,10 @@ function makeLocalTab(): TabState {
     agentDefinitions: [],
     agentStates: {},
     primaryAgentId: null,
+    orchestrateNext: false,
+    orchAnalyzing: false,
+    pendingOrchPrompt: null,
+    orchProposal: null,
   }
 }
 
@@ -1034,16 +1046,23 @@ export const useSessionStore = create<State>((set, get) => ({
 
   handleStatusChange: (tabId, newStatus) => {
     set((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === tabId
-          ? {
-              ...t,
-              status: newStatus as TabStatus,
-              // Clear activity when transitioning to idle (e.g., after warmup init)
-              ...(newStatus === 'idle' ? { currentActivity: '', permissionQueue: [] as import('../../shared/types').PermissionRequest[], permissionDenied: null } : {}),
-            }
-          : t
-      ),
+      tabs: s.tabs.map((t) => {
+        if (t.id !== tabId) return t
+        const isTerminal = newStatus === 'failed' || newStatus === 'completed' || newStatus === 'dead'
+        return {
+          ...t,
+          status: newStatus as TabStatus,
+          // Clear run state on terminal transitions so UI resets properly
+          ...(isTerminal || newStatus === 'idle'
+            ? {
+                activeRequestId: null,
+                currentActivity: '',
+                permissionQueue: [] as import('../../shared/types').PermissionRequest[],
+                permissionDenied: null,
+              }
+            : {}),
+        }
+      }),
     }))
   },
 
@@ -1120,7 +1139,12 @@ export const useSessionStore = create<State>((set, get) => ({
   },
 
   orchStart: async (prompt, projectPath) => {
-    const { activeTabId } = get()
+    const { activeTabId, tabs } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+
+    // Race guard: don't start if already running or not in multi-agent mode
+    if (!tab || tab.status === 'running' || tab.orchestrationMode !== 'multi') return
+
     try {
       await window.clui.orchStart(activeTabId, prompt, projectPath)
     } catch (err) {
@@ -1223,6 +1247,17 @@ export const useSessionStore = create<State>((set, get) => ({
             ]
             break
 
+          case 'tool_call_update': {
+            // Append partial input to the last running tool message
+            const msgs = [...updatedAgent.messages]
+            const lastTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
+            if (lastTool) {
+              lastTool.toolInput = (lastTool.toolInput || '') + event.partialInput
+            }
+            updatedAgent.messages = msgs
+            break
+          }
+
           case 'tool_call_complete': {
             const msgs = [...updatedAgent.messages]
             const runningTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
@@ -1247,7 +1282,7 @@ export const useSessionStore = create<State>((set, get) => ({
             // Cost warning: check total across all agents
             const allAgents = { ...tab.agentStates, [agentId]: updatedAgent }
             const totalCost = Object.values(allAgents).reduce((sum: number, a: AgentState) => sum + a.costUsd, 0)
-            if (totalCost >= 0.50) {
+            if (totalCost >= COST_WARNING_USD) {
               useNotificationStore.getState().addNotification({
                 type: 'warning',
                 message: `Orchestration cost: $${totalCost.toFixed(4)} across agents`,
@@ -1293,6 +1328,242 @@ export const useSessionStore = create<State>((set, get) => ({
       })
 
       return { tabs }
+    })
+  },
+
+  // ─── Auto-Orchestration Actions ───
+
+  toggleOrchestrate: () => {
+    const { activeTabId } = get()
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId ? { ...t, orchestrateNext: !t.orchestrateNext } : t
+      ),
+    }))
+  },
+
+  orchAnalyzeAndPropose: async (prompt, projectPath) => {
+    const { activeTabId, tabs } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab) return
+
+    // Set analyzing state and hold the prompt
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? {
+              ...t,
+              orchAnalyzing: true,
+              pendingOrchPrompt: prompt,
+              orchProposal: null,
+              orchestrateNext: false, // consume the one-shot toggle
+              messages: [
+                ...t.messages,
+                { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
+              ],
+            }
+          : t
+      ),
+    }))
+
+    try {
+      const result = await window.clui.orchAnalyze(prompt)
+
+      if (result.error || !result.analysis || !result.analysis.shouldOrchestrate) {
+        // Analysis says no orchestration needed — send as normal prompt
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === activeTabId
+              ? { ...t, orchAnalyzing: false, pendingOrchPrompt: null, orchProposal: null }
+              : t
+          ),
+        }))
+
+        // If analysis explicitly said no, add a brief system note then send normally
+        if (result.analysis && !result.analysis.shouldOrchestrate) {
+          set((s) => ({
+            tabs: s.tabs.map((t) =>
+              t.id === activeTabId
+                ? {
+                    ...t,
+                    messages: [
+                      ...t.messages,
+                      { id: nextMsgId(), role: 'system' as const, content: 'Task is best handled by a single agent.', timestamp: Date.now() },
+                    ],
+                  }
+                : t
+            ),
+          }))
+        }
+
+        // Send as normal single-agent prompt (skip the user message since we already added it)
+        const { staticInfo } = get()
+        const resolvedPath = projectPath || tab.workingDirectory || staticInfo?.homePath || '~'
+        const requestId = crypto.randomUUID()
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === activeTabId
+              ? { ...t, status: 'connecting' as TabStatus, activeRequestId: requestId, currentActivity: 'Starting...' }
+              : t
+          ),
+        }))
+        const { preferredModel, planMode } = get()
+        let fullPrompt = prompt
+        if (planMode) {
+          fullPrompt = `[PLAN MODE] You are in PLAN MODE. Analyze the request, research the approach, and describe your plan in detail. Do NOT make any code changes.\n\n${fullPrompt}`
+        }
+        let resolvedModel = preferredModel
+        if (preferredModel === 'auto') {
+          resolvedModel = autoSelectModel(fullPrompt)
+          set({ lastResolvedModel: resolvedModel })
+        }
+        window.clui.prompt(activeTabId, requestId, {
+          prompt: fullPrompt,
+          projectPath: resolvedPath,
+          sessionId: tab.claudeSessionId || undefined,
+          model: resolvedModel || undefined,
+        }).catch((err: Error) => {
+          get().handleError(activeTabId, { message: err.message, stderrTail: [], exitCode: null, elapsedMs: 0, toolCallCount: 0 })
+        })
+        return
+      }
+
+      // Analysis says orchestrate — show proposal card
+      const proposal: OrchestrationProposal = {
+        agents: result.analysis.agents.map((a) => ({
+          role: a.role as AgentRole,
+          name: a.name,
+          description: a.description,
+        })),
+        reasoning: result.analysis.reasoning,
+        complexity: result.analysis.complexity as 'low' | 'medium' | 'high',
+      }
+
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === activeTabId
+            ? { ...t, orchAnalyzing: false, orchProposal: proposal }
+            : t
+        ),
+      }))
+    } catch (err) {
+      // On error, fall back to normal send
+      const msg = err instanceof Error ? err.message : String(err)
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === activeTabId
+            ? {
+                ...t,
+                orchAnalyzing: false,
+                pendingOrchPrompt: null,
+                orchProposal: null,
+                messages: [
+                  ...t.messages,
+                  { id: nextMsgId(), role: 'system' as const, content: `Orchestration analysis failed: ${msg}. Sending as normal prompt.`, timestamp: Date.now() },
+                ],
+              }
+            : t
+        ),
+      }))
+      get().sendMessage(prompt, projectPath)
+    }
+  },
+
+  orchApproveProposal: async () => {
+    const { activeTabId, tabs, staticInfo } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab?.orchProposal || !tab.pendingOrchPrompt) return
+
+    const proposal = tab.orchProposal
+    const prompt = tab.pendingOrchPrompt
+    const projectPath = tab.workingDirectory || staticInfo?.homePath || '~'
+
+    // Clear proposal state
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? { ...t, orchProposal: null, pendingOrchPrompt: null }
+          : t
+      ),
+    }))
+
+    // Build agent definitions from proposal
+    const agents: AgentDefinition[] = proposal.agents.map((a) => ({
+      id: crypto.randomUUID(),
+      role: a.role,
+      name: a.name,
+      description: a.description,
+    }))
+
+    // Define agents then start orchestration
+    await get().orchDefineAgents(activeTabId, agents)
+    await get().orchStart(prompt, projectPath)
+  },
+
+  orchEditProposal: async (editedAgents) => {
+    const { activeTabId, tabs } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab?.orchProposal) return
+
+    // Update proposal with edited agents
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? {
+              ...t,
+              orchProposal: {
+                ...t.orchProposal!,
+                agents: editedAgents,
+              },
+            }
+          : t
+      ),
+    }))
+  },
+
+  orchDismissProposal: () => {
+    const { activeTabId, tabs, staticInfo } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab?.pendingOrchPrompt) return
+
+    const prompt = tab.pendingOrchPrompt
+    const projectPath = tab.workingDirectory || staticInfo?.homePath || '~'
+
+    // Clear orchestration state
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? { ...t, orchProposal: null, pendingOrchPrompt: null }
+          : t
+      ),
+    }))
+
+    // Send as normal single-agent prompt (user message already in chat)
+    const requestId = crypto.randomUUID()
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? { ...t, status: 'connecting' as TabStatus, activeRequestId: requestId, currentActivity: 'Starting...' }
+          : t
+      ),
+    }))
+    const { preferredModel, planMode } = get()
+    let fullPrompt = prompt
+    if (planMode) {
+      fullPrompt = `[PLAN MODE] You are in PLAN MODE. Analyze the request, research the approach, and describe your plan in detail. Do NOT make any code changes.\n\n${fullPrompt}`
+    }
+    let resolvedModel = preferredModel
+    if (preferredModel === 'auto') {
+      resolvedModel = autoSelectModel(fullPrompt)
+      set({ lastResolvedModel: resolvedModel })
+    }
+    window.clui.prompt(activeTabId, requestId, {
+      prompt: fullPrompt,
+      projectPath,
+      sessionId: tab.claudeSessionId || undefined,
+      model: resolvedModel || undefined,
+    }).catch((err: Error) => {
+      get().handleError(activeTabId, { message: err.message, stderrTail: [], exitCode: null, elapsedMs: 0, toolCallCount: 0 })
     })
   },
 }))

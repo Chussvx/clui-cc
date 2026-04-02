@@ -1,4 +1,6 @@
 import { EventEmitter } from 'events'
+import { readFile, readdir, stat } from 'fs/promises'
+import { join as pathJoin } from 'path'
 import { RunManager } from './run-manager'
 import { PtyRunManager } from './pty-run-manager'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
@@ -15,7 +17,9 @@ import type {
   AgentDefinition,
   AgentStatus,
   OrchestrationMode,
+  UsageData,
 } from '../../shared/types'
+import { COST_WARNING_USD } from '../../shared/types'
 
 const MAX_QUEUE_DEPTH = 32
 
@@ -75,6 +79,10 @@ export class ControlPlane extends EventEmitter {
   private permissionServer: PermissionServer
   /** Per-run tokens: requestId → runToken (for cleanup on exit/error) */
   private runTokens = new Map<string, string>()
+  /** Per-run metadata for post-run widget scanning: requestId → { startTime, projectPath } */
+  private runMeta = new Map<string, { startTime: number; projectPath: string }>()
+  /** Files already injected as widgets (to prevent duplicates between hook interception and post-run scan) */
+  private injectedWidgetFiles = new Set<string>()
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves */
   private permissionMode: 'ask' | 'auto' = 'ask'
   /** Resolves when the permission server is ready (or failed). Dispatch awaits this. */
@@ -88,10 +96,10 @@ export class ControlPlane extends EventEmitter {
   private static readonly MAX_CONCURRENT_AGENTS = 5
   /** Currently running agent count (for semaphore) */
   private activeAgentCount = 0
-  /** Cost warning threshold per orchestration (USD) */
-  private static readonly COST_WARNING_USD = 0.50
   /** Start time per orchestration tab (for duration telemetry) */
   private orchestrationStartTimes = new Map<string, number>()
+  /** Accumulated per-agent cost for orchestration tabs */
+  private orchestrationAgentCosts = new Map<string, Map<string, number>>()
 
   constructor(interactivePty = false) {
     super()
@@ -144,6 +152,35 @@ export class ControlPlane extends EventEmitter {
         options,
       }
       this.emit('event', tabId, permEvent)
+    })
+
+    // ─── Widget interception: inline HTML/SVG visualizations ───
+    // When the permission server detects a Write to .html/.svg, inject the content
+    // as a synthetic text_chunk so the renderer shows it as an inline widget.
+    this.permissionServer.on('widget-content', (filePath: string, content: string, kind: string, tabId: string, _requestId: string) => {
+      if (!this.tabs.has(tabId)) return
+      this.injectedWidgetFiles.add(filePath.toLowerCase())
+      log(`Widget inject (content): ${kind} from "${filePath}" (${content.length} chars) → tab ${tabId.substring(0, 8)}…`)
+      const syntheticText = `\n\n\`\`\`${kind}\n${content}\n\`\`\`\n`
+      this.emit('event', tabId, { type: 'text_chunk', text: syntheticText } as NormalizedEvent)
+    })
+
+    // When the permission server blocks a browser-open command for an .html/.svg file,
+    // read the file from disk and inject it as an inline widget.
+    this.permissionServer.on('widget-file', (filePath: string, tabId: string, _requestId: string) => {
+      if (!this.tabs.has(tabId)) return
+      this.injectedWidgetFiles.add(filePath.toLowerCase())
+      log(`Widget inject (file): reading "${filePath}" → tab ${tabId.substring(0, 8)}…`)
+      readFile(filePath, 'utf-8').then((content) => {
+        if (content.length < 80) return
+        const lower = filePath.toLowerCase()
+        const kind = (lower.endsWith('.svg')) ? 'svg' : 'html'
+        log(`Widget inject (file): injecting ${kind} (${content.length} chars) → tab ${tabId.substring(0, 8)}…`)
+        const syntheticText = `\n\n\`\`\`${kind}\n${content}\n\`\`\`\n`
+        this.emit('event', tabId, { type: 'text_chunk', text: syntheticText } as NormalizedEvent)
+      }).catch((err) => {
+        log(`Widget inject (file): failed to read "${filePath}" — ${(err as Error).message}`)
+      })
     })
 
     log(`Interactive PTY transport: ${interactivePty ? 'ENABLED' : 'disabled'}`)
@@ -202,6 +239,32 @@ export class ControlPlane extends EventEmitter {
 
       // For orchestration runs, wrap events for the renderer via ORCH_AGENT_EVENT
       if (agentMeta) {
+        // Intercept task_complete to emit agent_task_complete and accumulate costs
+        if (event.type === 'task_complete') {
+          // Accumulate per-agent cost
+          let costMap = this.orchestrationAgentCosts.get(tabId)
+          if (!costMap) {
+            costMap = new Map()
+            this.orchestrationAgentCosts.set(tabId, costMap)
+          }
+          const prevCost = costMap.get(agentMeta.agentId) || 0
+          costMap.set(agentMeta.agentId, prevCost + event.costUsd)
+
+          // Emit the agent_task_complete event the renderer expects
+          this.emit('event', tabId, {
+            type: 'agent_task_complete',
+            agentId: agentMeta.agentId,
+            agentName: agentMeta.agentName,
+            result: event.result,
+            costUsd: event.costUsd,
+            durationMs: event.durationMs,
+            numTurns: event.numTurns,
+            usage: event.usage,
+            sessionId: event.sessionId,
+          } as NormalizedEvent)
+        }
+
+        // Forward the raw event to the agent's event stream
         this.emit('event', tabId, event, agentMeta.agentId)
         return
       }
@@ -238,10 +301,6 @@ export class ControlPlane extends EventEmitter {
       if (agentMeta) {
         this.activeAgentCount = Math.max(0, this.activeAgentCount - 1)
 
-        // Clean up agent tracking
-        tab.activeAgentRequests.delete(agentMeta.agentId)
-        this.requestToAgent.delete(requestId)
-
         if (sessionId) {
           tab.agentSessions.set(agentMeta.agentId, sessionId)
         }
@@ -268,11 +327,16 @@ export class ControlPlane extends EventEmitter {
           })
         }
 
-        // Resolve the inflight promise
+        // Resolve the inflight promise BEFORE cleaning up tracking maps
+        // so _checkOrchestrationComplete sees the correct agent count
         if (inflight) {
           inflight.resolve()
           this.inflightRequests.delete(requestId)
         }
+
+        // Clean up agent tracking AFTER resolving — prevents race in _checkOrchestrationComplete
+        tab.activeAgentRequests.delete(agentMeta.agentId)
+        this.requestToAgent.delete(requestId)
 
         // Check if all agents are done
         this._checkOrchestrationComplete(tabId)
@@ -312,16 +376,20 @@ export class ControlPlane extends EventEmitter {
         this.inflightRequests.delete(requestId)
       }
 
+      // Post-run widget scan: find .html/.svg files created during this run
+      this._scanForWidgetFiles(requestId, tabId)
+
       this._processQueue(tabId)
     })
 
     this.runManager.on('error', (requestId: string, err: Error) => {
-      // Clean up per-run token
+      // Clean up per-run token and run metadata
       const runToken = this.runTokens.get(requestId)
       if (runToken) {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
+      this.runMeta.delete(requestId)
 
       const tabId = this._findTabByRequest(requestId)
       const agentMeta = this.requestToAgent.get(requestId)
@@ -620,10 +688,23 @@ export class ControlPlane extends EventEmitter {
       }
     }
 
-    // Cancel all orchestration agent runs
+    // Cancel all orchestration agent runs — emit status changes so renderer can update
     for (const [agentId, requestId] of tab.activeAgentRequests) {
+      const agentMeta = this.requestToAgent.get(requestId)
+
       this.cancel(requestId)
       this.requestToAgent.delete(requestId)
+
+      // Notify renderer that this agent was cancelled
+      if (agentMeta) {
+        this.emit('event', tabId, {
+          type: 'agent_status_change',
+          agentId,
+          agentName: agentMeta.agentName,
+          newStatus: 'cancelled' as AgentStatus,
+          oldStatus: 'running' as AgentStatus,
+        })
+      }
 
       const inflight = this.inflightRequests.get(requestId)
       if (inflight) {
@@ -632,6 +713,7 @@ export class ControlPlane extends EventEmitter {
       }
     }
     tab.activeAgentRequests.clear()
+    this.orchestrationAgentCosts.delete(tabId)
 
     // Remove queued requests for this tab, rejecting all waiters
     this.requestQueue = this.requestQueue.filter((r) => {
@@ -738,6 +820,9 @@ export class ControlPlane extends EventEmitter {
     tab.activeRequestId = requestId
     if (!this.initRequestIds.has(requestId)) tab.promptCount++
     tab.lastActivityAt = Date.now()
+
+    // Track run start time + project path for post-run widget scanning
+    this.runMeta.set(requestId, { startTime: Date.now(), projectPath: options.projectPath })
 
     // Set status to connecting (first run) or running (subsequent)
     const newStatus: TabStatus = tab.claudeSessionId ? 'running' : 'connecting'
@@ -897,6 +982,101 @@ export class ControlPlane extends EventEmitter {
 
   // ─── Queue Processing ───
 
+  /**
+   * Post-run widget scan: find .html/.svg files created/modified during the run
+   * and inject them as inline widgets. This catches ALL file creation methods
+   * (Write, Bash cat/heredoc, MCP tools, etc.) regardless of which tool was used.
+   */
+  private _scanForWidgetFiles(requestId: string, tabId: string): void {
+    const meta = this.runMeta.get(requestId)
+    this.runMeta.delete(requestId)
+    if (!meta) {
+      log(`Widget scan: no runMeta for ${requestId} — skipping`)
+      return
+    }
+
+    const { startTime, projectPath } = meta
+    if (!projectPath) {
+      log(`Widget scan: no projectPath — skipping`)
+      return
+    }
+
+    log(`Widget scan: starting for "${projectPath}" (run started ${new Date(startTime).toISOString()})`)
+
+    // Fire-and-forget — don't block the exit handler
+    this._doWidgetFileScan(tabId, projectPath, startTime).catch((err) => {
+      log(`Widget scan error: ${(err as Error).message}`)
+    })
+  }
+
+  private async _doWidgetFileScan(tabId: string, projectPath: string, startTime: number): Promise<void> {
+    if (!this.tabs.has(tabId)) return
+
+    let entries: string[]
+    try {
+      entries = await readdir(projectPath)
+    } catch (err) {
+      log(`Widget scan: cannot read "${projectPath}" — ${(err as Error).message}`)
+      return
+    }
+
+    const htmlFiles: Array<{ name: string; fullPath: string; mtime: number }> = []
+    const allHtmlFiles: string[] = []
+
+    for (const name of entries) {
+      const lower = name.toLowerCase()
+      if (!lower.endsWith('.html') && !lower.endsWith('.htm') && !lower.endsWith('.svg')) continue
+
+      allHtmlFiles.push(name)
+      const fullPath = pathJoin(projectPath, name)
+      try {
+        const s = await stat(fullPath)
+        // File must have been modified during or after the run started
+        // Use a small buffer (2s before) to account for timing
+        if (s.mtimeMs >= startTime - 2000) {
+          htmlFiles.push({ name, fullPath, mtime: s.mtimeMs })
+        }
+      } catch {
+        continue
+      }
+    }
+
+    log(`Widget scan: ${allHtmlFiles.length} html/svg file(s) in dir, ${htmlFiles.length} modified during run`)
+
+    if (htmlFiles.length === 0) return
+
+    // Sort by modification time (oldest first)
+    htmlFiles.sort((a, b) => a.mtime - b.mtime)
+
+    // Limit to 5 files max to avoid flooding the chat
+    const filesToInject = htmlFiles.slice(0, 5)
+
+    log(`Widget scan: found ${htmlFiles.length} new file(s) in "${projectPath}", injecting ${filesToInject.length}`)
+
+    for (const file of filesToInject) {
+      if (!this.tabs.has(tabId)) return // Tab may have closed
+
+      // Skip files already injected via hook interception (Write tool or browser-open)
+      if (this.injectedWidgetFiles.has(file.fullPath.toLowerCase())) {
+        log(`Widget scan: skipping "${file.name}" (already injected via hook)`)
+        continue
+      }
+
+      try {
+        const content = await readFile(file.fullPath, 'utf-8')
+        if (content.length < 80) continue // Too small to be a real visualization
+
+        const kind = file.name.toLowerCase().endsWith('.svg') ? 'svg' : 'html'
+        log(`Widget scan inject: ${kind} "${file.name}" (${content.length} chars) → tab ${tabId.substring(0, 8)}…`)
+        this.injectedWidgetFiles.add(file.fullPath.toLowerCase())
+        const syntheticText = `\n\n\`\`\`${kind}\n${content}\n\`\`\`\n`
+        this.emit('event', tabId, { type: 'text_chunk', text: syntheticText } as NormalizedEvent)
+      } catch (err) {
+        log(`Widget scan: failed to read "${file.fullPath}" — ${(err as Error).message}`)
+      }
+    }
+  }
+
   private _processQueue(tabId: string): void {
     // Find next queued request for this specific tab
     const idx = this.requestQueue.findIndex((r) => r.tabId === tabId)
@@ -960,13 +1140,13 @@ export class ControlPlane extends EventEmitter {
       throw new Error(`Tab ${tabId} has active runs — cannot redefine agents`)
     }
 
-    // Validate: at least one agent, and exactly one orchestrator if >1 agent
-    if (agents.length === 0) {
-      throw new Error('At least one agent definition is required')
+    // Validate: at least 2 agents for multi-agent mode, exactly one orchestrator
+    if (agents.length < 2) {
+      throw new Error('Multi-agent orchestration requires at least 2 agents')
     }
 
     const orchestrators = agents.filter((a) => a.role === 'orchestrator')
-    if (agents.length > 1 && orchestrators.length !== 1) {
+    if (orchestrators.length !== 1) {
       throw new Error(`Multi-agent mode requires exactly one orchestrator (found ${orchestrators.length})`)
     }
 
@@ -1024,7 +1204,6 @@ export class ControlPlane extends EventEmitter {
     }
 
     this._setTabStatus(tabId, 'running')
-    this.orchestrationStartTimes.set(tabId, Date.now())
     log(`Tab ${tabId}: starting orchestration with ${requestedCount} agents`)
 
     const launchPromises: Promise<void>[] = []
@@ -1070,6 +1249,9 @@ export class ControlPlane extends EventEmitter {
       const p = this._dispatchAgentRun(tabId, requestId, agentOptions)
       launchPromises.push(p)
     }
+
+    // Record start time AFTER all agents are dispatched (not before)
+    this.orchestrationStartTimes.set(tabId, Date.now())
 
     // Don't await all — they run concurrently. Errors are handled per-agent.
     for (const p of launchPromises) {
@@ -1207,10 +1389,22 @@ export class ControlPlane extends EventEmitter {
 
     log(`Tab ${tabId}: all agents completed — orchestration done (${(durationMs / 1000).toFixed(1)}s)`)
 
+    // Gather real cost data from accumulated agent costs
+    const costMap = this.orchestrationAgentCosts.get(tabId)
+    const agentCosts: Record<string, number> = {}
+    let totalCostUsd = 0
+    if (costMap) {
+      for (const [agentId, cost] of costMap) {
+        agentCosts[agentId] = cost
+        totalCostUsd += cost
+      }
+      this.orchestrationAgentCosts.delete(tabId)
+    }
+
     this.emit('event', tabId, {
       type: 'orchestration_complete',
-      totalCostUsd: 0,  // Renderer accumulates from individual agent_task_complete events
-      agentCosts: {},
+      totalCostUsd,
+      agentCosts,
       durationMs,
     })
 

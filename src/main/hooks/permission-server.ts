@@ -22,7 +22,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { EventEmitter } from 'events'
 import { writeFileSync, mkdirSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, isAbsolute, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import { log as _log } from '../logger'
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
@@ -30,6 +30,42 @@ const DEFAULT_PORT = 19836
 const MAX_BODY_SIZE = 1024 * 1024 // 1MB
 
 const DEBUG = process.env.CLUI_DEBUG === '1'
+
+// Commands that open files in the default browser/application
+const BROWSER_OPEN_COMMANDS = /^\s*(start|open|xdg-open|sensible-browser|wslview|explorer|cmd\s+\/c\s+start)\s+/i
+
+/** Check if a Bash command opens an .html/.svg file in the browser */
+function detectBrowserOpenHtml(command: unknown): string | null {
+  if (typeof command !== 'string') return null
+  const match = command.match(BROWSER_OPEN_COMMANDS)
+  if (!match) return null
+  // Extract the file path after the open command
+  let rest = command.substring(match[0].length).trim()
+  // Windows `start` often uses: start "" "file.html" (empty title arg)
+  if (/^""\s+/.test(rest)) {
+    rest = rest.replace(/^""\s+/, '')
+  }
+  rest = rest.replace(/^["']|["']$/g, '')
+  const lower = rest.toLowerCase()
+  if (lower.endsWith('.html') || lower.endsWith('.htm') || lower.endsWith('.svg')) {
+    return rest
+  }
+  return null
+}
+
+/** Check if a Write tool call targets an .html/.svg file */
+function detectWriteHtml(toolName: string, toolInput: Record<string, unknown>): { filePath: string; content: string; kind: 'html' | 'svg' } | null {
+  if (!/^(Write|Edit|write_to_file|create_file)$/i.test(toolName)) return null
+  const filePath = String(toolInput.file_path || toolInput.filePath || toolInput.path || '')
+  const content = String(toolInput.content || toolInput.new_string || toolInput.text || '')
+  if (!filePath) return null
+  const lower = filePath.toLowerCase()
+  let kind: 'html' | 'svg' | null = null
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) kind = 'html'
+  else if (lower.endsWith('.svg')) kind = 'svg'
+  if (!kind) return null
+  return { filePath, content, kind }
+}
 
 // Tools that need explicit user approval via the permission card.
 // This is the small set of tool classes that map to real, user-meaningful
@@ -561,12 +597,53 @@ export class PermissionServer extends EventEmitter {
       }
     }
 
+    // ─── Block visualization MCP tools — force Claude to use inline HTML ───
+    if (/^mcp__.*Three_js_3D_Viewer|^mcp__.*Mermaid|^mcp__.*Excalidraw/i.test(toolName)) {
+      log(`Blocked visualization MCP tool: ${toolName}`)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(denyResponse(
+        'This MCP visualization tool is NOT available in CLUI. ' +
+        'Instead, create the visualization as a fenced ```html code block directly in your response. ' +
+        'CLUI renders ```html blocks inline as interactive widgets. ' +
+        'Use <canvas> with vanilla JS, or inline <svg>. Do NOT use any MCP tools for visualizations.'
+      )))
+      return
+    }
+
     // Auto-approve safe (read-only) Bash commands without prompting
     if (toolName === 'Bash' && isSafeBashCommand(toolRequest.tool_input?.command)) {
-      if (DEBUG) log(`Auto-allowing safe Bash: ${String(toolRequest.tool_input?.command).substring(0, 80)}`)
+      log(`Auto-safe Bash: ${String(toolRequest.tool_input?.command).substring(0, 100)}`)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(allowResponse('Safe read-only command')))
       return
+    }
+
+    // ─── Widget interception: Bash opening .html/.svg in browser ───
+    // Deny the browser-open command and emit widget-file so CLUI renders it inline.
+    if (toolName === 'Bash') {
+      log(`Non-safe Bash: ${String(toolRequest.tool_input?.command).substring(0, 150)}`)
+      const htmlFile = detectBrowserOpenHtml(toolRequest.tool_input?.command)
+      if (htmlFile) {
+        // Resolve relative paths using the tool's CWD
+        const resolvedPath = isAbsolute(htmlFile) ? htmlFile : resolve(toolRequest.cwd || '.', htmlFile)
+        log(`Widget intercept: blocking browser open for "${resolvedPath}"`)
+        this.emit('widget-file', resolvedPath, registration.tabId, registration.requestId)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(denyResponse(
+          'CLUI renders visualizations inline — no browser needed. The visualization is displayed in the chat.'
+        )))
+        return
+      }
+    }
+
+    // ─── Widget interception: Write/Edit creating .html/.svg file ───
+    // Allow the Write (file needs to be created) but also emit content for inline rendering.
+    if (toolRequest.tool_input) {
+      const writeInfo = detectWriteHtml(toolName, toolRequest.tool_input)
+      if (writeInfo && writeInfo.content.length >= 80) {
+        log(`Widget intercept: Write to ${writeInfo.kind} file "${writeInfo.filePath}" (${writeInfo.content.length} chars)`)
+        this.emit('widget-content', writeInfo.filePath, writeInfo.content, writeInfo.kind, registration.tabId, registration.requestId)
+      }
     }
 
     // Generate question ID and wait for user decision

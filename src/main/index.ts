@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session, protocol } from 'electron'
 import { join } from 'path'
-import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
+import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs'
 import { createInterface } from 'readline'
 import { homedir } from 'os'
 import { ControlPlane } from './claude/control-plane'
@@ -9,9 +9,9 @@ import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './m
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
 import { TerminalManager } from './terminal-manager'
-import { improvePrompt, generateClarifications, buildClarifiedPrompt } from './prompt-improver'
+import { improvePrompt, generateClarifications, buildClarifiedPrompt, analyzeForOrchestration } from './prompt-improver'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, EnrichedError } from '../shared/types'
+import type { RunOptions, NormalizedEvent, EnrichedError, MemoryEntry, MemoryListResult } from '../shared/types'
 
 const DEBUG_MODE = process.env.CLUI_DEBUG === '1'
 const SPACES_DEBUG = DEBUG_MODE || process.env.CLUI_SPACES_DEBUG === '1'
@@ -23,7 +23,7 @@ function getContentSecurityPolicy(): string {
     : "connect-src 'self';"
   const scriptSrc = isDev
     ? "script-src 'self' 'unsafe-inline' 'unsafe-eval';"
-    : "script-src 'self';"
+    : "script-src 'self' 'unsafe-inline';"
 
   return [
     "default-src 'none'",
@@ -35,13 +35,19 @@ function getContentSecurityPolicy(): string {
     connectSrc,
     "object-src 'none'",
     "base-uri 'none'",
-    "frame-src 'none'",
+    "frame-src blob: data: clui-widget:",
+    "child-src blob: data: clui-widget:",
   ].join('; ')
 }
 
 function installContentSecurityPolicy(): void {
   const csp = getContentSecurityPolicy()
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    // Don't inject restrictive CSP into widget content (iframes or expanded windows)
+    if (details.resourceType === 'subFrame' || details.url.startsWith('clui-widget://')) {
+      callback({ responseHeaders: details.responseHeaders })
+      return
+    }
     callback({
       responseHeaders: {
         ...details.responseHeaders,
@@ -197,6 +203,7 @@ function createWindow(): void {
     // Enable OS-level click-through for transparent regions.
     // { forward: true } ensures mousemove events still reach the renderer
     // so it can toggle click-through off when cursor enters interactive UI.
+    // Works on macOS and Windows (Electron 35+).
     mainWindow?.setIgnoreMouseEvents(true, { forward: true })
     if (process.env.ELECTRON_RENDERER_URL) {
       mainWindow?.webContents.openDevTools({ mode: 'detach' })
@@ -437,7 +444,101 @@ ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }:
   return controlPlane.respondToPermission(tabId, questionId, optionId)
 })
 
+// ─── Debug: inject test widget into a tab ───
+ipcMain.handle('clui:debug-inject-widget', (_event, tabId: string) => {
+  log(`DEBUG: injecting test widget into tab ${tabId}`)
+  const testHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Weekly Sales</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body { padding: 20px; background: var(--bg, #1a1a2e); color: var(--fg, #e0e0e0);
+         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  h3 { text-align: center; font-size: 16px; margin-bottom: 16px; }
+  .chart { display: flex; align-items: flex-end; gap: 12px; height: 200px; padding: 0 8px; }
+  .bar-group { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  .bar { width: 100%; border-radius: 6px 6px 0 0; transition: height 0.5s cubic-bezier(.4,0,.2,1); }
+  .bar:hover { filter: brightness(1.2); cursor: pointer; }
+  .value { font-size: 12px; font-weight: 700; margin-bottom: 4px; min-height: 18px; }
+  .label { margin-top: 8px; font-size: 11px; opacity: 0.7; }
+  .controls { display: flex; justify-content: center; margin-top: 16px; }
+  .btn { background: var(--accent, #6c63ff); color: #fff; border: none; padding: 8px 20px;
+         border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+         transition: transform 0.15s, box-shadow 0.15s; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(108,99,255,0.4); }
+  .btn:active { transform: scale(0.97); }
+</style></head><body>
+<h3>Weekly Sales</h3>
+<div class="chart" id="chart"></div>
+<div class="controls"><button class="btn" onclick="randomize()">Randomize</button></div>
+<script>
+  var days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var barColors = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22'];
+  var chart = document.getElementById('chart');
+
+  days.forEach(function(day, i) {
+    var g = document.createElement('div');
+    g.className = 'bar-group';
+    g.innerHTML = '<span class="value"></span><div class="bar"></div><span class="label">' + day + '</span>';
+    g.querySelector('.bar').style.background = barColors[i];
+    chart.appendChild(g);
+  });
+
+  function randomize() {
+    var values = days.map(function() { return Math.floor(Math.random() * 90) + 10; });
+    var max = Math.max.apply(null, values);
+    var groups = chart.querySelectorAll('.bar-group');
+    for (var i = 0; i < groups.length; i++) {
+      groups[i].querySelector('.value').textContent = values[i];
+      groups[i].querySelector('.bar').style.height = (values[i] / max * 100) + '%';
+    }
+  }
+  randomize();
+</script>
+</body></html>`
+  const syntheticText = `\n\nHere is a test visualization:\n\n\`\`\`html\n${testHtml}\n\`\`\`\n`
+  controlPlane.emit('event', tabId, { type: 'text_chunk', text: syntheticText })
+  return { success: true }
+})
+
 // ─── Orchestration Mode IPC ───
+
+// ─── Register widget HTML and return a clui-widget:// URL ───
+ipcMain.handle('clui:register-widget', (_event, html: string) => {
+  const id = String(++widgetIdCounter)
+  widgetStore.set(id, html)
+  return { url: `clui-widget://widget/${id}` }
+})
+
+// ─── Open widget in a standalone OS window ───
+ipcMain.handle('clui:open-widget-window', (_event, { title, srcDoc }: { title: string; srcDoc: string }) => {
+  log(`Opening widget window: "${title}"`)
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const w = Math.min(920, Math.round(screenW * 0.7))
+  const h = Math.min(660, Math.round(screenH * 0.7))
+  const widgetWin = new BrowserWindow({
+    width: w,
+    height: h,
+    title,
+    alwaysOnTop: true,
+    autoHideMenuBar: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1a1a2e' : '#ffffff',
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+  // Use the custom protocol so JS executes freely
+  const id = String(++widgetIdCounter)
+  widgetStore.set(id, srcDoc)
+  widgetWin.loadURL(`clui-widget://widget/${id}`)
+  return { success: true }
+})
+
+ipcMain.handle(IPC.ORCH_ANALYZE, async (_event, prompt: string) => {
+  log('IPC ORCH_ANALYZE')
+  return analyzeForOrchestration(prompt)
+})
 
 ipcMain.handle(IPC.ORCH_DEFINE_AGENTS, (_event, { tabId, agents }: { tabId: string; agents: import('../shared/types').AgentDefinition[] }) => {
   log(`IPC ORCH_DEFINE_AGENTS: tab=${tabId} agents=${agents.length}`)
@@ -468,14 +569,18 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
   log(`IPC LIST_SESSIONS ${projectPath ? `(path=${projectPath})` : ''}`)
   try {
     const cwd = projectPath || process.cwd()
-    // Validate projectPath — reject null bytes, newlines, non-absolute paths
-    if (/[\0\r\n]/.test(cwd) || !cwd.startsWith('/')) {
+    // Validate projectPath — reject null bytes and newlines
+    if (/[\0\r\n]/.test(cwd)) {
       log(`LIST_SESSIONS: rejected invalid projectPath: ${cwd}`)
       return []
     }
-    // Claude stores project sessions at ~/.claude/projects/<encoded-path>/
-    // Path encoding: replace all '/' with '-' (leading '/' becomes leading '-')
-    const encodedPath = cwd.replace(/\//g, '-')
+    // Validate absolute path: Unix starts with '/', Windows starts with drive letter (e.g. 'C:\')
+    const isAbsolute = cwd.startsWith('/') || /^[A-Za-z]:[\\/]/.test(cwd)
+    if (!isAbsolute && cwd !== '~') {
+      log(`LIST_SESSIONS: rejected non-absolute projectPath: ${cwd}`)
+      return []
+    }
+    const encodedPath = encodeProjectPath(cwd)
     const sessionsDir = join(homedir(), '.claude', 'projects', encodedPath)
     if (!existsSync(sessionsDir)) {
       log(`LIST_SESSIONS: directory not found: ${sessionsDir}`)
@@ -563,12 +668,17 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
 
   try {
     const cwd = projectPath || process.cwd()
-    // Validate projectPath — reject null bytes, newlines, non-absolute paths
-    if (/[\0\r\n]/.test(cwd) || !cwd.startsWith('/')) {
+    // Validate projectPath — reject null bytes and newlines
+    if (/[\0\r\n]/.test(cwd)) {
       log(`LOAD_SESSION: rejected invalid projectPath: ${cwd}`)
       return []
     }
-    const encodedPath = cwd.replace(/\//g, '-')
+    const isAbsolute = cwd.startsWith('/') || /^[A-Za-z]:[\\/]/.test(cwd)
+    if (!isAbsolute && cwd !== '~') {
+      log(`LOAD_SESSION: rejected non-absolute projectPath: ${cwd}`)
+      return []
+    }
+    const encodedPath = encodeProjectPath(cwd)
     const filePath = join(homedir(), '.claude', 'projects', encodedPath, `${sessionId}.jsonl`)
     if (!existsSync(filePath)) return []
 
@@ -617,6 +727,137 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
   } catch (err) {
     log(`LOAD_SESSION error: ${err}`)
     return []
+  }
+})
+
+// ─── Memory (CLAUDE.md + auto-memory) ───
+
+/** Encode a project path the same way Claude CLI does for ~/.claude/projects/ */
+function encodeProjectPath(cwd: string): string {
+  if (/^[A-Za-z]:/.test(cwd)) {
+    return cwd.replace(':', '').replace(/[\\/]+/g, '--')
+  }
+  return cwd.replace(/\//g, '-')
+}
+
+/** Parse frontmatter from a memory markdown file */
+function parseMemoryFile(content: string): { name: string; description: string; memoryType: string; body: string } {
+  const result = { name: '', description: '', memoryType: 'unknown', body: content }
+  const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/)
+  if (!fmMatch) return result
+  const frontmatter = fmMatch[1]
+  result.body = fmMatch[2].trim()
+  for (const line of frontmatter.split('\n')) {
+    const kv = line.match(/^(\w+):\s*(.+)$/)
+    if (!kv) continue
+    const [, key, val] = kv
+    if (key === 'name') result.name = val.trim()
+    else if (key === 'description') result.description = val.trim()
+    else if (key === 'type') result.memoryType = val.trim()
+  }
+  return result
+}
+
+ipcMain.handle(IPC.MEMORY_LIST, async (_e, projectPath?: string) => {
+  log(`IPC MEMORY_LIST ${projectPath || ''}`)
+  try {
+    const cwd = projectPath || process.cwd()
+    const encodedPath = encodeProjectPath(cwd)
+    const projectDir = join(homedir(), '.claude', 'projects', encodedPath)
+    const memoryDir = join(projectDir, 'memory')
+
+    const result: MemoryListResult = { claudeMdFiles: [], memories: [], projectDir: encodedPath }
+
+    // ─── CLAUDE.md files ───
+    // 1. Project-scoped CLAUDE.md inside .claude/projects/<path>/
+    const projectClaudeMd = join(projectDir, 'CLAUDE.md')
+    if (existsSync(projectClaudeMd)) {
+      result.claudeMdFiles.push({
+        path: projectClaudeMd,
+        label: 'Project Instructions',
+        content: readFileSync(projectClaudeMd, 'utf-8'),
+      })
+    }
+    // 2. Repo root CLAUDE.md
+    if (existsSync(join(cwd, 'CLAUDE.md'))) {
+      result.claudeMdFiles.push({
+        path: join(cwd, 'CLAUDE.md'),
+        label: 'Repo CLAUDE.md',
+        content: readFileSync(join(cwd, 'CLAUDE.md'), 'utf-8'),
+      })
+    }
+    // 3. Global user CLAUDE.md
+    const globalClaudeMd = join(homedir(), '.claude', 'CLAUDE.md')
+    if (existsSync(globalClaudeMd)) {
+      result.claudeMdFiles.push({
+        path: globalClaudeMd,
+        label: 'Global Instructions',
+        content: readFileSync(globalClaudeMd, 'utf-8'),
+      })
+    }
+
+    // ─── Auto-memory entries ───
+    if (existsSync(memoryDir)) {
+      const files = readdirSync(memoryDir).filter((f: string) => f.endsWith('.md') && f !== 'MEMORY.md')
+      for (const file of files) {
+        try {
+          const raw = readFileSync(join(memoryDir, file), 'utf-8')
+          const parsed = parseMemoryFile(raw)
+          result.memories.push({
+            filename: file,
+            name: parsed.name || file.replace(/\.md$/, ''),
+            description: parsed.description,
+            memoryType: (parsed.memoryType as MemoryEntry['memoryType']) || 'unknown',
+            body: parsed.body,
+          })
+        } catch {}
+      }
+    }
+
+    return result
+  } catch (err) {
+    log(`MEMORY_LIST error: ${err}`)
+    return { claudeMdFiles: [], memories: [], projectDir: '' }
+  }
+})
+
+ipcMain.handle(IPC.MEMORY_READ, async (_e, arg: { projectPath: string; filename: string }) => {
+  log(`IPC MEMORY_READ ${arg.filename}`)
+  try {
+    const encodedPath = encodeProjectPath(arg.projectPath)
+    const filePath = join(homedir(), '.claude', 'projects', encodedPath, 'memory', arg.filename)
+    if (!existsSync(filePath)) return null
+    return readFileSync(filePath, 'utf-8')
+  } catch (err) {
+    log(`MEMORY_READ error: ${err}`)
+    return null
+  }
+})
+
+ipcMain.handle(IPC.MEMORY_WRITE, async (_e, arg: { projectPath: string; filename: string; content: string }) => {
+  log(`IPC MEMORY_WRITE ${arg.filename}`)
+  try {
+    const encodedPath = encodeProjectPath(arg.projectPath)
+    const memoryDir = join(homedir(), '.claude', 'projects', encodedPath, 'memory')
+    if (!existsSync(memoryDir)) mkdirSync(memoryDir, { recursive: true })
+    writeFileSync(join(memoryDir, arg.filename), arg.content, 'utf-8')
+    return { ok: true }
+  } catch (err) {
+    log(`MEMORY_WRITE error: ${err}`)
+    return { ok: false, error: String(err) }
+  }
+})
+
+ipcMain.handle(IPC.MEMORY_DELETE, async (_e, arg: { projectPath: string; filename: string }) => {
+  log(`IPC MEMORY_DELETE ${arg.filename}`)
+  try {
+    const encodedPath = encodeProjectPath(arg.projectPath)
+    const filePath = join(homedir(), '.claude', 'projects', encodedPath, 'memory', arg.filename)
+    if (existsSync(filePath)) unlinkSync(filePath)
+    return { ok: true }
+  } catch (err) {
+    log(`MEMORY_DELETE error: ${err}`)
+    return { ok: false, error: String(err) }
   }
 })
 
@@ -1225,6 +1466,18 @@ async function requestPermissions(): Promise<void> {
   // the screenshot feature is actually used.
 }
 
+// ─── Widget Protocol ───
+// Register a custom scheme so widget iframes get their own origin and can run scripts
+// freely without inheriting the parent's restrictive CSP.
+// MUST be called before app.whenReady().
+protocol.registerSchemesAsPrivileged([{
+  scheme: 'clui-widget',
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false },
+}])
+
+const widgetStore = new Map<string, string>()
+let widgetIdCounter = 0
+
 // ─── App Lifecycle ───
 
 app.whenReady().then(async () => {
@@ -1239,6 +1492,19 @@ app.whenReady().then(async () => {
   await requestPermissions()
 
   installContentSecurityPolicy()
+
+  // Handle clui-widget:// URLs — serve widget HTML from memory
+  protocol.handle('clui-widget', (request) => {
+    const url = new URL(request.url)
+    const id = url.pathname.replace(/^\/+/, '')
+    const html = widgetStore.get(id)
+    if (html) {
+      return new Response(html, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })
+    }
+    return new Response('Not found', { status: 404 })
+  })
 
   // Skill provisioning — non-blocking, streams status to renderer
   ensureSkills((status: SkillStatus) => {

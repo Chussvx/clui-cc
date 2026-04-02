@@ -5,14 +5,17 @@ import remarkGfm from 'remark-gfm'
 import {
   FileText, PencilSimple, FileArrowUp, Terminal, MagnifyingGlass, Globe,
   Robot, Question, Wrench, FolderOpen, Copy, Check, CaretRight, CaretDown,
-  SpinnerGap, ArrowCounterClockwise, Square,
+  SpinnerGap, ArrowCounterClockwise, Square, ArrowDown, ArrowUp,
 } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
+import { useVisualizationStore } from '../stores/visualizationStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
 import { AgentStatusPanel } from './AgentStatusPanel'
+import { OrchestrationSuggestionCard } from './OrchestrationSuggestionCard'
+import { InlineWidget } from './WidgetBlock'
 import { useColors, useThemeStore } from '../theme'
-import type { Message } from '../../shared/types'
+import type { Message, Widget } from '../../shared/types'
 
 // ─── Constants ───
 
@@ -67,6 +70,7 @@ export function ConversationView() {
   const [hovered, setHovered] = useState(false)
   const [renderOffset, setRenderOffset] = useState(0) // 0 = show from tail
   const isNearBottomRef = useRef(true)
+  const [showScrollDown, setShowScrollDown] = useState(false)
   const prevTabIdRef = useRef(activeTabId)
   const colors = useColors()
   const expandedUI = useThemeStore((s) => s.expandedUI)
@@ -86,15 +90,87 @@ export function ConversationView() {
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    isNearBottomRef.current = nearBottom
+    setShowScrollDown(!nearBottom)
   }, [])
+
+  const scrollToBottom = useCallback(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    }
+  }, [])
+
+  // Collect indices of user messages for prev/next navigation
+  const userMsgIndices = useMemo(() => {
+    const indices: number[] = []
+    const msgs = tab?.messages ?? []
+    for (let i = 0; i < msgs.length; i++) {
+      if (msgs[i].role === 'user') indices.push(i)
+    }
+    return indices
+  }, [tab?.messages])
+
+  // Find the user message element closest to (but above) the current scroll position
+  const findCurrentUserMsgIdx = useCallback((): number => {
+    const el = scrollRef.current
+    if (!el) return -1
+    // Find all user message elements by querying data attribute
+    const userEls = el.querySelectorAll<HTMLElement>('[data-user-msg-idx]')
+    let closest = -1
+    const scrollTop = el.scrollTop
+    for (const uel of userEls) {
+      const idx = parseInt(uel.getAttribute('data-user-msg-idx') || '-1', 10)
+      if (uel.offsetTop <= scrollTop + 80) {
+        closest = idx
+      }
+    }
+    return closest
+  }, [])
+
+  const scrollToPrevPrompt = useCallback(() => {
+    const el = scrollRef.current
+    if (!el || userMsgIndices.length === 0) return
+    const currentIdx = findCurrentUserMsgIdx()
+    // Find the user message index before the current one
+    let targetIdx = userMsgIndices[0]
+    for (let i = userMsgIndices.length - 1; i >= 0; i--) {
+      if (userMsgIndices[i] < currentIdx) {
+        targetIdx = userMsgIndices[i]
+        break
+      }
+    }
+    const targetEl = el.querySelector<HTMLElement>(`[data-user-msg-idx="${targetIdx}"]`)
+    if (targetEl) {
+      el.scrollTo({ top: targetEl.offsetTop - 12, behavior: 'smooth' })
+    }
+  }, [userMsgIndices, findCurrentUserMsgIdx])
+
+  const scrollToNextPrompt = useCallback(() => {
+    const el = scrollRef.current
+    if (!el || userMsgIndices.length === 0) return
+    const currentIdx = findCurrentUserMsgIdx()
+    // Find the user message index after the current one
+    let targetIdx = userMsgIndices[userMsgIndices.length - 1]
+    for (let i = 0; i < userMsgIndices.length; i++) {
+      if (userMsgIndices[i] > currentIdx) {
+        targetIdx = userMsgIndices[i]
+        break
+      }
+    }
+    const targetEl = el.querySelector<HTMLElement>(`[data-user-msg-idx="${targetIdx}"]`)
+    if (targetEl) {
+      el.scrollTo({ top: targetEl.offsetTop - 12, behavior: 'smooth' })
+    }
+  }, [userMsgIndices, findCurrentUserMsgIdx])
 
   // Auto-scroll when content changes and user is near bottom.
   const msgCount = tab?.messages.length ?? 0
   const lastMsg = tab?.messages[tab.messages.length - 1]
   const permissionQueueLen = tab?.permissionQueue?.length ?? 0
   const queuedCount = tab?.queuedPrompts?.length ?? 0
-  const scrollTrigger = `${msgCount}:${lastMsg?.content?.length ?? 0}:${permissionQueueLen}:${queuedCount}`
+  const orchState = tab?.orchAnalyzing ? 'analyzing' : tab?.orchProposal ? 'proposal' : ''
+  const scrollTrigger = `${msgCount}:${lastMsg?.content?.length ?? 0}:${permissionQueueLen}:${queuedCount}:${orchState}`
 
   useEffect(() => {
     if (isNearBottomRef.current && scrollRef.current) {
@@ -144,6 +220,7 @@ export function ConversationView() {
   return (
     <div
       data-clui-ui
+      style={{ position: 'relative' }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
@@ -174,7 +251,7 @@ export function ConversationView() {
 
             switch (item.kind) {
               case 'user':
-                return <UserMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
+                return <UserMessage key={item.message.id} message={item.message} skipMotion={isHistorical} msgIndex={msgIndex} />
               case 'assistant':
                 return <AssistantMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
               case 'tool-group':
@@ -186,6 +263,32 @@ export function ConversationView() {
             }
           })}
         </div>
+
+        {/* Orchestration analysis / proposal card */}
+        <AnimatePresence>
+          {tab.orchAnalyzing && (
+            <motion.div
+              key="orch-analyzing"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2 }}
+              className="mx-4 mt-2 mb-2"
+              data-clui-ui
+            >
+              <div
+                className="flex items-center gap-2 px-3 py-2 rounded-xl text-[11px]"
+                style={{ background: colors.accentLight, color: colors.accent }}
+              >
+                <SpinnerGap size={12} className="animate-spin" />
+                Analyzing task for orchestration...
+              </div>
+            </motion.div>
+          )}
+          {tab.orchProposal && !tab.orchAnalyzing && (
+            <OrchestrationSuggestionCard key="orch-proposal" proposal={tab.orchProposal} />
+          )}
+        </AnimatePresence>
 
         {/* Agent status panel (orchestration mode) */}
         {tab.orchestrationMode === 'multi' && Object.keys(tab.agentStates).length > 0 && (
@@ -230,6 +333,89 @@ export function ConversationView() {
 
         <div ref={bottomRef} />
       </div>
+
+      {/* Scroll nav buttons — prev prompt / next prompt / scroll to bottom */}
+      <AnimatePresence>
+        {showScrollDown && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            transition={{ duration: 0.15 }}
+            data-clui-ui
+            style={{
+              position: 'absolute',
+              bottom: 36,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              display: 'flex',
+              borderRadius: 16,
+              background: colors.surfacePrimary,
+              border: `1px solid ${colors.containerBorder}`,
+              boxShadow: colors.cardShadow,
+              zIndex: 10,
+              overflow: 'hidden',
+            }}
+          >
+            <button
+              onClick={scrollToPrevPrompt}
+              className="no-drag"
+              style={{
+                width: 32,
+                height: 32,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'none',
+                border: 'none',
+                color: colors.textSecondary,
+                cursor: 'pointer',
+                borderRight: `1px solid ${colors.containerBorder}`,
+              }}
+              title="Previous prompt"
+            >
+              <ArrowUp size={14} weight="bold" />
+            </button>
+            <button
+              onClick={scrollToNextPrompt}
+              className="no-drag"
+              style={{
+                width: 32,
+                height: 32,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'none',
+                border: 'none',
+                color: colors.textSecondary,
+                cursor: 'pointer',
+                borderRight: `1px solid ${colors.containerBorder}`,
+              }}
+              title="Next prompt"
+            >
+              <ArrowDown size={14} weight="bold" />
+            </button>
+            <button
+              onClick={scrollToBottom}
+              className="no-drag"
+              style={{
+                width: 32,
+                height: 32,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'none',
+                border: 'none',
+                color: colors.accent,
+                cursor: 'pointer',
+              }}
+              title="Scroll to bottom"
+            >
+              <ArrowDown size={14} weight="fill" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Activity row — overlaps bottom of scroll area as a fade strip */}
       <div
@@ -394,24 +580,29 @@ function InterruptButton({ tabId }: { tabId: string }) {
 
 // ─── User Message ───
 
-function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
+function UserMessage({ message, skipMotion, msgIndex }: { message: Message; skipMotion?: boolean; msgIndex?: number }) {
   const colors = useColors()
   const content = (
-    <div
-      className="text-[13px] leading-[1.5] px-3 py-1.5 max-w-[85%]"
-      style={{
-        background: colors.userBubble,
-        color: colors.userBubbleText,
-        border: `1px solid ${colors.userBubbleBorder}`,
-        borderRadius: '14px 14px 4px 14px',
-      }}
-    >
-      {message.content}
+    <div className="group/usrmsg flex items-end gap-1 justify-end max-w-[85%] ml-auto">
+      <div className="opacity-0 group-hover/usrmsg:opacity-100 transition-opacity duration-100 flex-shrink-0">
+        <CopyButton text={message.content} />
+      </div>
+      <div
+        className="text-[13px] leading-[1.5] px-3 py-1.5"
+        style={{
+          background: colors.userBubble,
+          color: colors.userBubbleText,
+          border: `1px solid ${colors.userBubbleBorder}`,
+          borderRadius: '14px 14px 4px 14px',
+        }}
+      >
+        {message.content}
+      </div>
     </div>
   )
 
   if (skipMotion) {
-    return <div className="flex justify-end py-1.5">{content}</div>
+    return <div className="flex justify-end py-1.5" data-user-msg-idx={msgIndex}>{content}</div>
   }
 
   return (
@@ -420,6 +611,7 @@ function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: b
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.15 }}
       className="flex justify-end py-1.5"
+      data-user-msg-idx={msgIndex}
     >
       {content}
     </motion.div>
@@ -563,6 +755,29 @@ function ImageCard({ src, alt, colors }: { src?: string; alt?: string; colors: R
 
 // ─── Assistant Message (memoized — only re-renders when content changes) ───
 
+/** Detect if a code block is a renderable HTML/SVG widget */
+function isWidgetLanguage(lang: string | undefined): 'html' | 'svg' | null {
+  if (!lang) return null
+  const l = lang.toLowerCase().replace('language-', '')
+  if (l === 'html' || l === 'htm') return 'html'
+  if (l === 'svg') return 'svg'
+  return null
+}
+
+/** Extract a human-readable title from HTML content */
+function extractWidgetTitle(code: string, kind: 'html' | 'svg'): string {
+  // Try <title> tag
+  const titleMatch = code.match(/<title[^>]*>([^<]+)<\/title>/i)
+  if (titleMatch) return titleMatch[1].trim()
+  // Try first <h1>-<h3>
+  const headingMatch = code.match(/<h[1-3][^>]*>([^<]+)<\/h[1-3]>/i)
+  if (headingMatch) return headingMatch[1].trim()
+  return kind === 'svg' ? 'SVG Diagram' : 'Interactive Widget'
+}
+
+/** Minimum code length to auto-detect as widget (skip tiny snippets) */
+const MIN_WIDGET_LENGTH = 80
+
 const AssistantMessage = React.memo(function AssistantMessage({
   message,
   skipMotion,
@@ -571,6 +786,11 @@ const AssistantMessage = React.memo(function AssistantMessage({
   skipMotion?: boolean
 }) {
   const colors = useColors()
+  const addWidget = useVisualizationStore((s) => s.addWidget)
+  const widgets = useVisualizationStore((s) => s.widgets)
+
+  // Track which widgets we've already registered for this message
+  const registeredRef = useRef<Set<string>>(new Set())
 
   const markdownComponents = useMemo(() => ({
     table: ({ children }: any) => <TableScrollWrapper>{children}</TableScrollWrapper>,
@@ -587,7 +807,45 @@ const AssistantMessage = React.memo(function AssistantMessage({
       </button>
     ),
     img: ({ src, alt }: any) => <ImageCard src={src} alt={alt} colors={colors} />,
-  }), [colors])
+    code: ({ className, children, ...props }: any) => {
+      // react-markdown v9: fenced code blocks get className="language-xxx"
+      // Inline code gets no className. We intercept fenced blocks here.
+      const lang = String(className || '')
+      const kind = isWidgetLanguage(lang)
+      const code = (Array.isArray(children)
+        ? children.map((c: any) => (typeof c === 'string' ? c : '')).join('')
+        : String(children ?? '')
+      ).trim()
+
+      if (kind && code.length >= MIN_WIDGET_LENGTH) {
+        const widgetId = `w-${message.id}-${code.length}`
+        const title = extractWidgetTitle(code, kind)
+
+        // Register widget in store (deduped by store)
+        if (!registeredRef.current.has(widgetId)) {
+          registeredRef.current.add(widgetId)
+          addWidget({
+            id: widgetId,
+            messageId: message.id,
+            title,
+            kind,
+            code,
+            timestamp: message.timestamp,
+          })
+        }
+
+        const widget = widgets.find((w) => w.id === widgetId) ?? {
+          id: widgetId, messageId: message.id, title, kind, code, timestamp: message.timestamp,
+        }
+
+        // Render inline preview — no raw code block shown
+        return <InlineWidget widget={widget} colors={colors} />
+      }
+
+      return <code className={className} {...props}>{children}</code>
+    },
+    pre: ({ children }: any) => <pre>{children}</pre>,
+  }), [colors, message.id, message.timestamp, addWidget, widgets])
 
   const inner = (
     <div className="group/msg relative">

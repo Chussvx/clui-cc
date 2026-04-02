@@ -50,8 +50,15 @@ function RunRow({ run, index, colors }: { run: RunResult; index: number; colors:
   )
 }
 
+interface TabGroup {
+  tabTitle: string
+  tabCost: number
+  runs: RunResult[]
+}
+
 export function CostDashboardPanel({ onClose }: { onClose: () => void }) {
   const costHistory = useSessionStore((s) => s.costHistory)
+  const tabs = useSessionStore((s) => s.tabs)
   const clearCostHistory = useSessionStore((s) => s.clearCostHistory)
   const colors = useColors()
 
@@ -61,6 +68,31 @@ export function CostDashboardPanel({ onClose }: { onClose: () => void }) {
   const avgDuration = costHistory.length > 0
     ? costHistory.reduce((sum, r) => sum + r.durationMs, 0) / costHistory.length / 1000
     : 0
+
+  // Group runs by tab (via sessionId → claudeSessionId match)
+  const tabGroups: TabGroup[] = (() => {
+    const sessionToTab = new Map<string, { title: string }>()
+    for (const tab of tabs) {
+      if (tab.claudeSessionId) {
+        sessionToTab.set(tab.claudeSessionId, { title: tab.title })
+      }
+    }
+    const groupMap = new Map<string, TabGroup>()
+    for (const run of costHistory) {
+      const tabInfo = sessionToTab.get(run.sessionId)
+      const key = tabInfo ? run.sessionId : '__other__'
+      const label = tabInfo?.title || 'Other'
+      if (!groupMap.has(key)) {
+        groupMap.set(key, { tabTitle: label, tabCost: 0, runs: [] })
+      }
+      const g = groupMap.get(key)!
+      g.tabCost += run.totalCostUsd
+      g.runs.push(run)
+    }
+    return Array.from(groupMap.values())
+  })()
+
+  const hasMultipleTabs = tabGroups.length > 1
 
   return (
     <motion.div
@@ -119,10 +151,30 @@ export function CostDashboardPanel({ onClose }: { onClose: () => void }) {
       {/* Run list */}
       <div className="flex-1 overflow-y-auto" style={{ maxHeight: 380 }}>
         {costHistory.length === 0 ? (
-          <div className="flex items-center justify-center py-12 text-[12px]" style={{ color: colors.textTertiary }}>
-            No usage data yet — send a message first
+          <div className="flex flex-col items-center justify-center gap-1 py-5 text-center">
+            <CurrencyDollar size={20} style={{ color: colors.textMuted, opacity: 0.5 }} />
+            <span className="text-[11px]" style={{ color: colors.textTertiary }}>
+              No usage data yet — costs appear after each run
+            </span>
           </div>
+        ) : hasMultipleTabs ? (
+          /* Per-tab grouped view */
+          tabGroups.map((group) => (
+            <div key={group.tabTitle}>
+              <div
+                className="flex items-center justify-between px-4 py-1.5 text-[10px] uppercase tracking-wider"
+                style={{ background: `${colors.surfaceHover}66`, color: colors.textTertiary }}
+              >
+                <span className="truncate">{group.tabTitle}</span>
+                <span style={{ fontWeight: 600, color: colors.textSecondary }}>${group.tabCost.toFixed(4)}</span>
+              </div>
+              {group.runs.map((run, i) => (
+                <RunRow key={`${run.sessionId}-${i}`} run={run} index={i} colors={colors} />
+              ))}
+            </div>
+          ))
         ) : (
+          /* Flat list when single tab */
           costHistory.map((run, i) => (
             <RunRow key={`${run.sessionId}-${i}`} run={run} index={i} colors={colors} />
           ))

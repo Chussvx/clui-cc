@@ -1,8 +1,9 @@
 import React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X, CurrencyDollar, Bell } from '@phosphor-icons/react'
+import { Plus, X, CurrencyDollar, Bell, Image, Brain } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useNotificationStore } from '../stores/notificationStore'
+import { useVisualizationStore } from '../stores/visualizationStore'
 import { HistoryPicker } from './HistoryPicker'
 import { SettingsPopover } from './SettingsPopover'
 import { useColors } from '../theme'
@@ -46,6 +47,8 @@ export function TabStrip() {
   const activePanel = useSessionStore((s) => s.activePanel)
   const togglePanel = useSessionStore((s) => s.togglePanel)
   const notificationCount = useNotificationStore((s) => s.notifications.length)
+  const widgetCount = useVisualizationStore((s) => s.widgets.length)
+  const totalCost = useSessionStore((s) => s.costHistory.reduce((sum, r) => sum + r.totalCostUsd, 0))
   const colors = useColors()
 
   return (
@@ -119,13 +122,18 @@ export function TabStrip() {
       <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 pr-2">
         <button
           onClick={() => togglePanel('cost')}
-          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+          className="flex-shrink-0 h-6 flex items-center justify-center rounded-full transition-colors gap-0.5 px-1"
           style={{
             color: activePanel === 'cost' ? colors.accent : colors.textTertiary,
           }}
           title="Cost & Usage"
         >
           <CurrencyDollar size={14} />
+          {totalCost > 0 && (
+            <span className="text-[9px] font-semibold" style={{ color: activePanel === 'cost' ? colors.accent : colors.textTertiary }}>
+              ${totalCost < 0.01 ? '<.01' : totalCost.toFixed(2)}
+            </span>
+          )}
         </button>
         <button
           onClick={() => togglePanel('notifications')}
@@ -146,6 +154,34 @@ export function TabStrip() {
           )}
         </button>
 
+        <button
+          onClick={() => togglePanel('visualizations')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors relative"
+          style={{
+            color: activePanel === 'visualizations' ? colors.accent : colors.textTertiary,
+          }}
+          title="Visualizations"
+        >
+          <Image size={14} />
+          {widgetCount > 0 && (
+            <span
+              className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold"
+              style={{ background: colors.accent, color: '#fff' }}
+            >
+              {widgetCount > 9 ? '9+' : widgetCount}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => togglePanel('memory')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+          style={{
+            color: activePanel === 'memory' ? colors.accent : colors.textTertiary,
+          }}
+          title="Memory"
+        >
+          <Brain size={14} />
+        </button>
         <button
           onClick={() => createTab()}
           className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
