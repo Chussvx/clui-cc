@@ -4,6 +4,7 @@ import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad } from '@phosphor-ic
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
+import { PromptImprover } from './PromptImprover'
 import { useColors } from '../theme'
 
 const INPUT_MIN_HEIGHT = 20
@@ -554,6 +555,14 @@ export function InputBar() {
           {voiceError}
         </div>
       )}
+
+      {/* Prompt improver — floats beside input when there's text */}
+      <PromptImprover
+        prompt={input}
+        onReprompt={(improved) => { setInput(improved); requestAnimationFrame(() => textareaRef.current?.focus()) }}
+        anchorRect={wrapperRef.current?.getBoundingClientRect() ?? null}
+        visible={input.trim().length > 0 && voiceState === 'idle' && !showSlashMenu && !isBusy}
+      />
     </div>
   )
 }

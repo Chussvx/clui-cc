@@ -82,6 +82,9 @@ interface State {
   /** Model resolved by auto-select for the current in-flight request */
   lastResolvedModel: string | null
 
+  // Terminal panel
+  terminalOpen: boolean
+
   // Marketplace state
   marketplaceOpen: boolean
   marketplaceCatalog: CatalogPlugin[]
@@ -101,6 +104,7 @@ interface State {
   closeTab: (tabId: string) => void
   clearTab: () => void
   toggleExpanded: () => void
+  toggleTerminal: () => void
   toggleMarketplace: () => void
   closeMarketplace: () => void
   loadMarketplace: (forceRefresh?: boolean) => Promise<void>
@@ -185,6 +189,9 @@ export const useSessionStore = create<State>((set, get) => ({
   costHistory: [],
   lastResolvedModel: null,
 
+  // Terminal
+  terminalOpen: false,
+
   // Marketplace
   marketplaceOpen: false,
   marketplaceCatalog: [],
@@ -264,6 +271,7 @@ export const useSessionStore = create<State>((set, get) => ({
       set((prev) => ({
         isExpanded: willExpand,
         marketplaceOpen: false,
+        terminalOpen: false,
         // Expanding = reading: clear unread flag
         tabs: willExpand
           ? prev.tabs.map((t) => t.id === tabId ? { ...t, hasUnread: false } : t)
@@ -274,6 +282,7 @@ export const useSessionStore = create<State>((set, get) => ({
       set((prev) => ({
         activeTabId: tabId,
         marketplaceOpen: false,
+        terminalOpen: false,
         tabs: prev.tabs.map((t) =>
           t.id === tabId ? { ...t, hasUnread: false } : t
         ),
@@ -294,12 +303,21 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 
+  toggleTerminal: () => {
+    const s = get()
+    if (s.terminalOpen) {
+      set({ terminalOpen: false })
+    } else {
+      set({ terminalOpen: !s.terminalOpen, isExpanded: false, marketplaceOpen: false })
+    }
+  },
+
   toggleMarketplace: () => {
     const s = get()
     if (s.marketplaceOpen) {
       set({ marketplaceOpen: false })
     } else {
-      set({ isExpanded: false, marketplaceOpen: true })
+      set({ isExpanded: false, marketplaceOpen: true, terminalOpen: false })
       get().loadMarketplace()
     }
   },

@@ -311,6 +311,37 @@ export class PtyRunManager extends EventEmitter {
   }
 
   private _findClaudeBinary(): string {
+    const IS_WIN = process.platform === 'win32'
+
+    if (IS_WIN) {
+      const appData = process.env.APPDATA || ''
+      const winCandidates = [
+        join(homedir(), '.local', 'bin', 'claude.exe'),
+        ...(appData ? [join(appData, 'npm', 'claude.cmd')] : []),
+        join(homedir(), '.npm-global', 'claude.cmd'),
+        'C:\\Program Files\\nodejs\\claude.cmd',
+      ]
+
+      for (const c of winCandidates) {
+        try {
+          execSync(`if exist "${c}" exit 0`, { stdio: 'ignore', shell: 'cmd.exe' })
+          return c
+        } catch {}
+      }
+
+      try {
+        const found = execSync('where claude.cmd', { encoding: 'utf-8', env: getCliEnv() }).trim()
+        if (found) return found.split('\n')[0].trim()
+      } catch {}
+
+      try {
+        const found = execSync('where claude', { encoding: 'utf-8', env: getCliEnv() }).trim()
+        if (found) return found.split('\n')[0].trim()
+      } catch {}
+
+      return 'claude'
+    }
+
     const candidates = [
       '/usr/local/bin/claude',
       '/opt/homebrew/bin/claude',
@@ -337,9 +368,11 @@ export class PtyRunManager extends EventEmitter {
 
   private _getEnv(): NodeJS.ProcessEnv {
     const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
+    const sep = process.platform === 'win32' ? '\\' : '/'
+    const pathSep = process.platform === 'win32' ? ';' : ':'
+    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf(sep))
     if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+      env.PATH = `${binDir}${pathSep}${env.PATH}`
     }
 
     return env

@@ -207,14 +207,16 @@ input::placeholder {
 .stack-btn:disabled { color: var(--clui-btn-disabled); cursor: default; }
 
 /* Collapsed: stacked on the right, overlapping */
-.stack-btn-1 { right: 0;    z-index: 3; }
-.stack-btn-2 { right: 28px; z-index: 2; }
-.stack-btn-3 { right: 56px; z-index: 1; }
+.stack-btn-1 { right: 0;    z-index: 4; }
+.stack-btn-2 { right: 28px; z-index: 3; }
+.stack-btn-3 { right: 56px; z-index: 2; }
+.stack-btn-4 { right: 84px; z-index: 1; }
 
 /* Expanded on hover: spread evenly */
 .btn-stack:hover .stack-btn-1 { right: 0; }
 .btn-stack:hover .stack-btn-2 { right: 56px; }
 .btn-stack:hover .stack-btn-3 { right: 112px; }
+.btn-stack:hover .stack-btn-4 { right: 168px; }
 
 /* ─── Drag region for frameless window ─── */
 /* Manual drag via IPC replaces -webkit-app-region which conflicts with setIgnoreMouseEvents */

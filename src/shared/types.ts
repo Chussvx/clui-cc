@@ -368,6 +368,18 @@ export const IPC = {
   // Permission mode
   SET_PERMISSION_MODE: 'clui:set-permission-mode',
 
+  // Prompt improvement (Haiku)
+  PROMPT_IMPROVE: 'clui:prompt-improve',
+  PROMPT_CLARIFY: 'clui:prompt-clarify',
+
+  // Embedded terminal (PTY)
+  PTY_OPEN: 'clui:pty-open',
+  PTY_INPUT: 'clui:pty-input',
+  PTY_RESIZE: 'clui:pty-resize',
+  PTY_CLOSE: 'clui:pty-close',
+  PTY_DATA: 'clui:pty-data',
+  PTY_EXIT: 'clui:pty-exit',
+
   // Legacy (kept for backward compat during migration)
   STREAM_EVENT: 'clui:stream-event',
   RUN_COMPLETE: 'clui:run-complete',

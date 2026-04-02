@@ -1,7 +1,8 @@
 import React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, X } from '@phosphor-icons/react'
+import { Plus, X, CurrencyDollar, Bell } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
+import { useNotificationStore } from '../stores/notificationStore'
 import { HistoryPicker } from './HistoryPicker'
 import { SettingsPopover } from './SettingsPopover'
 import { useColors } from '../theme'
@@ -42,6 +43,9 @@ export function TabStrip() {
   const selectTab = useSessionStore((s) => s.selectTab)
   const createTab = useSessionStore((s) => s.createTab)
   const closeTab = useSessionStore((s) => s.closeTab)
+  const activePanel = useSessionStore((s) => s.activePanel)
+  const togglePanel = useSessionStore((s) => s.togglePanel)
+  const notificationCount = useNotificationStore((s) => s.notifications.length)
   const colors = useColors()
 
   return (
@@ -113,6 +117,35 @@ export function TabStrip() {
 
       {/* Pinned action buttons — always visible on the right */}
       <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 pr-2">
+        <button
+          onClick={() => togglePanel('cost')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
+          style={{
+            color: activePanel === 'cost' ? colors.accent : colors.textTertiary,
+          }}
+          title="Cost & Usage"
+        >
+          <CurrencyDollar size={14} />
+        </button>
+        <button
+          onClick={() => togglePanel('notifications')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors relative"
+          style={{
+            color: activePanel === 'notifications' ? colors.accent : colors.textTertiary,
+          }}
+          title="Notifications"
+        >
+          <Bell size={14} />
+          {notificationCount > 0 && (
+            <span
+              className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold"
+              style={{ background: '#ef4444', color: '#fff' }}
+            >
+              {notificationCount > 9 ? '9+' : notificationCount}
+            </span>
+          )}
+        </button>
+
         <button
           onClick={() => createTab()}
           className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"

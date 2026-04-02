@@ -8,6 +8,8 @@ import { ensureSkills, type SkillStatus } from './skills/installer'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './marketplace/catalog'
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
+import { TerminalManager } from './terminal-manager'
+import { improvePrompt, generateClarifications, buildClarifiedPrompt } from './prompt-improver'
 import { IPC } from '../shared/types'
 import type { RunOptions, NormalizedEvent, EnrichedError } from '../shared/types'
 
@@ -63,6 +65,7 @@ let lastWindowBounds: Electron.Rectangle | null = null
 const INTERACTIVE_PTY = process.env.CLUI_INTERACTIVE_PERMISSIONS_PTY === '1'
 
 const controlPlane = new ControlPlane(INTERACTIVE_PTY)
+const terminalManager = new TerminalManager()
 
 // Keep native width fixed to avoid renderer animation vs setBounds race.
 // The UI itself still launches in compact mode; extra width is transparent/click-through.
@@ -124,6 +127,16 @@ controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatu
 
 controlPlane.on('error', (tabId: string, error: EnrichedError) => {
   broadcast('clui:enriched-error', tabId, error)
+})
+
+// ─── Wire TerminalManager events → renderer ───
+
+terminalManager.on('data', (termId: string, data: string) => {
+  broadcast(IPC.PTY_DATA, termId, data)
+})
+
+terminalManager.on('exit', (termId: string, code: number) => {
+  broadcast(IPC.PTY_EXIT, termId, code)
 })
 
 // ─── Window Creation ───
@@ -1036,43 +1049,92 @@ ipcMain.handle(IPC.OPEN_IN_TERMINAL, (_event, arg: string | null | { sessionId?:
     return false
   }
 
-  // Sanitize projectPath — reject null bytes, newlines, and non-absolute paths
-  if (/[\0\r\n]/.test(projectPath) || !projectPath.startsWith('/')) {
+  // Sanitize projectPath — reject null bytes and newlines; accept both Unix and Windows absolute paths
+  const isAbsolute = projectPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(projectPath)
+  if (/[\0\r\n]/.test(projectPath) || !isAbsolute) {
     log(`OPEN_IN_TERMINAL: rejected invalid projectPath: ${projectPath}`)
     return false
   }
 
-  // Shell-safe single-quote escaping: replace ' with '\'' (end quote, escaped literal quote, reopen quote)
-  // Single quotes block all shell expansion ($, `, \, etc.) — unlike double quotes which allow $() and backticks
-  const shellSingleQuote = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'"
-  // AppleScript string escaping: backslashes doubled, double quotes escaped
-  const escapeAppleScript = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  const IS_WIN = process.platform === 'win32'
 
-  const safeDir = escapeAppleScript(shellSingleQuote(projectPath))
+  try {
+    if (IS_WIN) {
+      // On Windows, open cmd.exe with the command
+      const args = sessionId
+        ? `cd /d "${projectPath}" && "${claudeBin}" --resume ${sessionId}`
+        : `cd /d "${projectPath}" && "${claudeBin}"`
 
-  let cmd: string
-  if (sessionId) {
-    // sessionId is UUID-validated above, safe to embed directly
-    cmd = `cd ${safeDir} && ${claudeBin} --resume ${sessionId}`
-  } else {
-    cmd = `cd ${safeDir} && ${claudeBin}`
-  }
+      execFile('cmd.exe', ['/c', 'start', 'cmd.exe', '/K', args], (err: Error | null) => {
+        if (err) log(`Failed to open terminal: ${err.message}`)
+        else log(`Opened terminal with: ${args}`)
+      })
+    } else {
+      // Shell-safe single-quote escaping: replace ' with '\'' (end quote, escaped literal quote, reopen quote)
+      const shellSingleQuote = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'"
+      // AppleScript string escaping: backslashes doubled, double quotes escaped
+      const escapeAppleScript = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 
-  const script = `tell application "Terminal"
+      const safeDir = escapeAppleScript(shellSingleQuote(projectPath))
+
+      let cmd: string
+      if (sessionId) {
+        cmd = `cd ${safeDir} && ${claudeBin} --resume ${sessionId}`
+      } else {
+        cmd = `cd ${safeDir} && ${claudeBin}`
+      }
+
+      const script = `tell application "Terminal"
   activate
   do script "${cmd}"
 end tell`
 
-  try {
-    execFile('/usr/bin/osascript', ['-e', script], (err: Error | null) => {
-      if (err) log(`Failed to open terminal: ${err.message}`)
-      else log(`Opened terminal with: ${cmd}`)
-    })
+      execFile('/usr/bin/osascript', ['-e', script], (err: Error | null) => {
+        if (err) log(`Failed to open terminal: ${err.message}`)
+        else log(`Opened terminal with: ${cmd}`)
+      })
+    }
     return true
   } catch (err: unknown) {
     log(`Failed to open terminal: ${err}`)
     return false
   }
+})
+
+// ─── Embedded terminal (PTY) IPC ───
+
+ipcMain.handle(IPC.PTY_OPEN, (_event, { termId, cols, rows, cwd }: { termId: string; cols: number; rows: number; cwd?: string }) => {
+  const ok = terminalManager.open(termId, cols, rows, cwd)
+  return { ok, available: terminalManager.isAvailable() }
+})
+
+ipcMain.on(IPC.PTY_INPUT, (_event, termId: string, data: string) => {
+  terminalManager.write(termId, data)
+})
+
+ipcMain.on(IPC.PTY_RESIZE, (_event, termId: string, cols: number, rows: number) => {
+  terminalManager.resize(termId, cols, rows)
+})
+
+ipcMain.handle(IPC.PTY_CLOSE, (_event, termId: string) => {
+  terminalManager.close(termId)
+})
+
+// ─── Prompt Improvement IPC ───
+
+ipcMain.handle(IPC.PROMPT_IMPROVE, async (_event, prompt: string) => {
+  log('IPC PROMPT_IMPROVE')
+  return improvePrompt(prompt)
+})
+
+ipcMain.handle(IPC.PROMPT_CLARIFY, async (_event, payload: { action: string; prompt: string; answers?: Array<{ question: string; answer: string }> }) => {
+  log(`IPC PROMPT_CLARIFY action=${payload.action}`)
+  if (payload.action === 'generate') {
+    return generateClarifications(payload.prompt)
+  } else if (payload.action === 'build') {
+    return buildClarifiedPrompt(payload.prompt, payload.answers || [])
+  }
+  return { error: 'Unknown action' }
 })
 
 // ─── Marketplace IPC ───
@@ -1211,6 +1273,7 @@ app.whenReady().then(async () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  terminalManager.closeAll()
   controlPlane.shutdown()
   flushLogs()
 })

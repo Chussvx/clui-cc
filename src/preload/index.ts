@@ -34,6 +34,18 @@ export interface CluiAPI {
   getTheme(): Promise<{ isDark: boolean }>
   onThemeChange(callback: (isDark: boolean) => void): () => void
 
+  // ─── Prompt improvement (Haiku) ───
+  improvePrompt(prompt: string): Promise<{ improved: string; error: string | null }>
+  clarifyPrompt(payload: { action: string; prompt: string; answers?: Array<{ question: string; answer: string }> }): Promise<any>
+
+  // ─── Embedded terminal (PTY) ───
+  openTerminal(termId: string, cols: number, rows: number, cwd?: string): Promise<{ ok: boolean; available: boolean }>
+  writeTerminal(termId: string, data: string): void
+  resizeTerminal(termId: string, cols: number, rows: number): void
+  closeTerminal(termId: string): Promise<void>
+  onTerminalData(callback: (termId: string, data: string) => void): () => void
+  onTerminalExit(callback: (termId: string, code: number) => void): () => void
+
   // ─── Window management ───
   resizeHeight(height: number): void
   setWindowWidth(width: number): void
@@ -92,6 +104,30 @@ const api: CluiAPI = {
     const handler = (_e: Electron.IpcRendererEvent, isDark: boolean) => callback(isDark)
     ipcRenderer.on(IPC.THEME_CHANGED, handler)
     return () => ipcRenderer.removeListener(IPC.THEME_CHANGED, handler)
+  },
+
+  // ─── Prompt improvement ───
+  improvePrompt: (prompt) => ipcRenderer.invoke(IPC.PROMPT_IMPROVE, prompt),
+  clarifyPrompt: (payload) => ipcRenderer.invoke(IPC.PROMPT_CLARIFY, payload),
+
+  // ─── Embedded terminal ───
+  openTerminal: (termId, cols, rows, cwd) =>
+    ipcRenderer.invoke(IPC.PTY_OPEN, { termId, cols, rows, cwd }),
+  writeTerminal: (termId, data) =>
+    ipcRenderer.send(IPC.PTY_INPUT, termId, data),
+  resizeTerminal: (termId, cols, rows) =>
+    ipcRenderer.send(IPC.PTY_RESIZE, termId, cols, rows),
+  closeTerminal: (termId) =>
+    ipcRenderer.invoke(IPC.PTY_CLOSE, termId),
+  onTerminalData: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, termId: string, data: string) => callback(termId, data)
+    ipcRenderer.on(IPC.PTY_DATA, handler)
+    return () => ipcRenderer.removeListener(IPC.PTY_DATA, handler)
+  },
+  onTerminalExit: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, termId: string, code: number) => callback(termId, code)
+    ipcRenderer.on(IPC.PTY_EXIT, handler)
+    return () => ipcRenderer.removeListener(IPC.PTY_EXIT, handler)
   },
 
   // ─── Window management ───

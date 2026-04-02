@@ -106,6 +106,7 @@ export class RunManager extends EventEmitter {
       // Windows: check common locations for claude.cmd / claude.exe
       const appData = process.env.APPDATA || ''
       const winCandidates = [
+        join(homedir(), '.local', 'bin', 'claude.exe'),
         ...(appData ? [join(appData, 'npm', 'claude.cmd')] : []),
         join(homedir(), '.npm-global', 'claude.cmd'),
         'C:\\Program Files\\nodejs\\claude.cmd',
@@ -233,6 +234,7 @@ export class RunManager extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env: this._getEnv(),
+      shell: IS_WIN,
     })
 
     log(`Spawned PID: ${child.pid}`)

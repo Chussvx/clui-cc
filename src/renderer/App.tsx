@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Paperclip, Camera, HeadCircuit, Bell, CurrencyDollar } from '@phosphor-icons/react'
+import { Paperclip, Camera, HeadCircuit, Terminal as TerminalIcon } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
 import { ConversationView } from './components/ConversationView'
 import { InputBar } from './components/InputBar'
@@ -8,7 +8,7 @@ import { StatusBar } from './components/StatusBar'
 import { MarketplacePanel } from './components/MarketplacePanel'
 import { NotificationPanel } from './components/NotificationPanel'
 import { CostDashboardPanel } from './components/CostDashboardPanel'
-import { useNotificationStore } from './stores/notificationStore'
+import { TerminalPanel } from './components/TerminalPanel'
 import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
@@ -187,10 +187,12 @@ export default function App() {
   }, [])
 
   const isExpanded = useSessionStore((s) => s.isExpanded)
+  const terminalOpen = useSessionStore((s) => s.terminalOpen)
   const marketplaceOpen = useSessionStore((s) => s.marketplaceOpen)
   const activePanel = useSessionStore((s) => s.activePanel)
+  const activeTabCwd = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId)?.workingDirectory)
+  const isDark = useThemeStore((s) => s.isDark)
   const togglePanel = useSessionStore((s) => s.togglePanel)
-  const notificationCount = useNotificationStore((s) => s.notifications.length)
   const isRunning = activeTabStatus === 'running' || activeTabStatus === 'connecting'
 
   // Layout dimensions — expandedUI widens and heightens the panel
@@ -218,6 +220,33 @@ export default function App() {
 
         {/* ─── 460px content column, centered. Circles overflow left. ─── */}
         <div style={{ width: contentWidth, position: 'relative', margin: '0 auto', transition: 'width 0.26s cubic-bezier(0.4, 0, 0.1, 1)', transform: 'translateY(var(--clui-card-y, 0px))' }}>
+
+          {/* ─── Terminal panel ─── */}
+          <AnimatePresence initial={false}>
+            {terminalOpen && (
+              <div
+                data-clui-ui
+                style={{
+                  width: 720,
+                  maxWidth: 720,
+                  marginLeft: '50%',
+                  transform: 'translateX(-50%)',
+                  marginBottom: 14,
+                  position: 'relative',
+                  zIndex: 30,
+                }}
+              >
+                <motion.div
+                  initial={{ opacity: 0, y: 14, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.985 }}
+                  transition={TRANSITION}
+                >
+                  <TerminalPanel cwd={activeTabCwd} isDark={isDark} />
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
 
           <AnimatePresence initial={false}>
             {marketplaceOpen && (
@@ -360,7 +389,7 @@ export default function App() {
                 >
                   <Camera size={17} />
                 </button>
-                {/* btn-3: Skills (back, leftmost) */}
+                {/* btn-3: Skills */}
                 <button
                   className="stack-btn stack-btn-3 glass-surface"
                   title="Skills & Plugins"
@@ -369,47 +398,15 @@ export default function App() {
                 >
                   <HeadCircuit size={17} />
                 </button>
+                {/* btn-4: Terminal */}
+                <button
+                  className="stack-btn stack-btn-4 glass-surface"
+                  title="Terminal"
+                  onClick={() => useSessionStore.getState().toggleTerminal()}
+                >
+                  <TerminalIcon size={17} />
+                </button>
               </div>
-            </div>
-
-            {/* Panel toolbar — notification + cost buttons */}
-            <div
-              data-clui-ui
-              className="flex items-center justify-end gap-1.5 mb-1.5 mr-2"
-              style={{ position: 'relative', zIndex: 16 }}
-            >
-              <button
-                className="w-8 h-8 rounded-full flex items-center justify-center transition-colors relative"
-                style={{
-                  background: activePanel === 'cost' ? colors.accent : colors.containerBg,
-                  color: activePanel === 'cost' ? colors.textOnAccent : colors.textSecondary,
-                  border: `1px solid ${colors.containerBorder}`,
-                }}
-                title="Cost & Usage"
-                onClick={() => togglePanel('cost')}
-              >
-                <CurrencyDollar size={16} />
-              </button>
-              <button
-                className="w-8 h-8 rounded-full flex items-center justify-center transition-colors relative"
-                style={{
-                  background: activePanel === 'notifications' ? colors.accent : colors.containerBg,
-                  color: activePanel === 'notifications' ? colors.textOnAccent : colors.textSecondary,
-                  border: `1px solid ${colors.containerBorder}`,
-                }}
-                title="Notifications"
-                onClick={() => togglePanel('notifications')}
-              >
-                <Bell size={16} />
-                {notificationCount > 0 && (
-                  <span
-                    className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
-                    style={{ background: '#ef4444', color: '#fff' }}
-                  >
-                    {notificationCount > 9 ? '9+' : notificationCount}
-                  </span>
-                )}
-              </button>
             </div>
 
             {/* Input pill */}
