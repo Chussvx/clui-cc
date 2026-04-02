@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType, AgentDefinition, AgentState, AgentStatus } from '../../shared/types'
 import { useThemeStore } from '../theme'
+import { useNotificationStore } from './notificationStore'
 import notificationSrc from '../../../resources/notification.mp3'
 
 // ─── Known models ───
@@ -1232,7 +1233,7 @@ export const useSessionStore = create<State>((set, get) => ({
             break
           }
 
-          case 'task_complete':
+          case 'task_complete': {
             updatedAgent.status = 'completed'
             updatedAgent.currentActivity = ''
             updatedAgent.costUsd += event.costUsd
@@ -1243,7 +1244,18 @@ export const useSessionStore = create<State>((set, get) => ({
               usage: event.usage,
               sessionId: event.sessionId,
             }
+            // Cost warning: check total across all agents
+            const allAgents = { ...tab.agentStates, [agentId]: updatedAgent }
+            const totalCost = Object.values(allAgents).reduce((sum: number, a: AgentState) => sum + a.costUsd, 0)
+            if (totalCost >= 0.50) {
+              useNotificationStore.getState().addNotification({
+                type: 'warning',
+                message: `Orchestration cost: $${totalCost.toFixed(4)} across agents`,
+                duration: 8000,
+              })
+            }
             break
+          }
 
           case 'permission_request': {
             const newReq: import('../../shared/types').PermissionRequest = {

@@ -88,6 +88,10 @@ export class ControlPlane extends EventEmitter {
   private static readonly MAX_CONCURRENT_AGENTS = 5
   /** Currently running agent count (for semaphore) */
   private activeAgentCount = 0
+  /** Cost warning threshold per orchestration (USD) */
+  private static readonly COST_WARNING_USD = 0.50
+  /** Start time per orchestration tab (for duration telemetry) */
+  private orchestrationStartTimes = new Map<string, number>()
 
   constructor(interactivePty = false) {
     super()
@@ -640,6 +644,7 @@ export class ControlPlane extends EventEmitter {
       return true
     })
 
+    this.orchestrationStartTimes.delete(tabId)
     this.tabs.delete(tabId)
     log(`Tab closed: ${tabId}`)
   }
@@ -1019,6 +1024,8 @@ export class ControlPlane extends EventEmitter {
     }
 
     this._setTabStatus(tabId, 'running')
+    this.orchestrationStartTimes.set(tabId, Date.now())
+    log(`Tab ${tabId}: starting orchestration with ${requestedCount} agents`)
 
     const launchPromises: Promise<void>[] = []
 
@@ -1193,14 +1200,18 @@ export class ControlPlane extends EventEmitter {
     // Still have active agents?
     if (tab.activeAgentRequests.size > 0) return
 
-    // All agents done — calculate totals
-    // (Individual agent costs are tracked by the renderer via agent_task_complete events)
-    log(`Tab ${tabId}: all agents completed — orchestration done`)
+    // All agents done — emit with duration telemetry
+    const startTime = this.orchestrationStartTimes.get(tabId)
+    const durationMs = startTime ? Date.now() - startTime : 0
+    this.orchestrationStartTimes.delete(tabId)
+
+    log(`Tab ${tabId}: all agents completed — orchestration done (${(durationMs / 1000).toFixed(1)}s)`)
 
     this.emit('event', tabId, {
       type: 'orchestration_complete',
       totalCostUsd: 0,  // Renderer accumulates from individual agent_task_complete events
       agentCosts: {},
+      durationMs,
     })
 
     // Tab status depends on whether the orchestrator succeeded
