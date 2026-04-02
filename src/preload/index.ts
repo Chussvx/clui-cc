@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage } from '../shared/types'
+import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, AgentDefinition } from '../shared/types'
 
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
@@ -33,6 +33,14 @@ export interface CluiAPI {
   setPermissionMode(mode: string): void
   getTheme(): Promise<{ isDark: boolean }>
   onThemeChange(callback: (isDark: boolean) => void): () => void
+
+  // ─── Orchestration Mode ───
+  orchDefineAgents(tabId: string, agents: AgentDefinition[]): Promise<void>
+  orchStart(tabId: string, prompt: string, projectPath: string): Promise<void>
+  orchCancelAgent(tabId: string, agentId: string): Promise<boolean>
+  orchCancelAll(tabId: string): Promise<boolean>
+  orchRespondPermission(tabId: string, agentId: string, questionId: string, optionId: string): Promise<boolean>
+  onAgentEvent(callback: (tabId: string, agentId: string, event: NormalizedEvent) => void): () => void
 
   // ─── Prompt improvement (Haiku) ───
   improvePrompt(prompt: string): Promise<{ improved: string; error: string | null }>
@@ -104,6 +112,24 @@ const api: CluiAPI = {
     const handler = (_e: Electron.IpcRendererEvent, isDark: boolean) => callback(isDark)
     ipcRenderer.on(IPC.THEME_CHANGED, handler)
     return () => ipcRenderer.removeListener(IPC.THEME_CHANGED, handler)
+  },
+
+  // ─── Orchestration Mode ───
+  orchDefineAgents: (tabId, agents) =>
+    ipcRenderer.invoke(IPC.ORCH_DEFINE_AGENTS, { tabId, agents }),
+  orchStart: (tabId, prompt, projectPath) =>
+    ipcRenderer.invoke(IPC.ORCH_START, { tabId, prompt, projectPath }),
+  orchCancelAgent: (tabId, agentId) =>
+    ipcRenderer.invoke(IPC.ORCH_CANCEL_AGENT, { tabId, agentId }),
+  orchCancelAll: (tabId) =>
+    ipcRenderer.invoke(IPC.ORCH_CANCEL_ALL, tabId),
+  orchRespondPermission: (tabId, agentId, questionId, optionId) =>
+    ipcRenderer.invoke(IPC.ORCH_RESPOND_PERMISSION, { tabId, agentId, questionId, optionId }),
+  onAgentEvent: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, tabId: string, agentId: string, event: NormalizedEvent) =>
+      callback(tabId, agentId, event)
+    ipcRenderer.on(IPC.ORCH_AGENT_EVENT, handler)
+    return () => ipcRenderer.removeListener(IPC.ORCH_AGENT_EVENT, handler)
   },
 
   // ─── Prompt improvement ───

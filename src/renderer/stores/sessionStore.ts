@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, PanelType, AgentDefinition, AgentState, AgentStatus } from '../../shared/types'
 import { useThemeStore } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
 
@@ -129,6 +129,14 @@ interface State {
   handleNormalizedEvent: (tabId: string, event: NormalizedEvent) => void
   handleStatusChange: (tabId: string, newStatus: string, oldStatus: string) => void
   handleError: (tabId: string, error: EnrichedError) => void
+
+  // Orchestration actions
+  orchDefineAgents: (tabId: string, agents: AgentDefinition[]) => Promise<void>
+  orchStart: (prompt: string, projectPath: string) => Promise<void>
+  orchCancelAgent: (agentId: string) => void
+  orchCancelAll: () => void
+  orchRespondPermission: (agentId: string, questionId: string, optionId: string) => void
+  handleAgentEvent: (tabId: string, agentId: string, event: NormalizedEvent) => void
 }
 
 let msgCounter = 0
@@ -172,6 +180,10 @@ function makeLocalTab(): TabState {
     workingDirectory: '~',
     hasChosenDirectory: false,
     additionalDirs: [],
+    orchestrationMode: 'single',
+    agentDefinitions: [],
+    agentStates: {},
+    primaryAgentId: null,
   }
 }
 
@@ -967,6 +979,36 @@ export const useSessionStore = create<State>((set, get) => ({
               ]
             }
             break
+
+          case 'agent_status_change': {
+            const agentState = updated.agentStates[event.agentId]
+            if (agentState) {
+              updated.agentStates = {
+                ...updated.agentStates,
+                [event.agentId]: {
+                  ...agentState,
+                  status: event.newStatus as AgentStatus,
+                  currentActivity: event.newStatus === 'running' ? 'Working...' : '',
+                },
+              }
+            }
+            break
+          }
+
+          case 'orchestration_complete':
+            updated.status = 'completed'
+            updated.currentActivity = ''
+            updated.messages = [
+              ...updated.messages,
+              {
+                id: nextMsgId(),
+                role: 'system',
+                content: 'All agents completed.',
+                timestamp: Date.now(),
+              },
+            ]
+            playNotificationIfHidden()
+            break
         }
 
         return updated
@@ -1033,6 +1075,213 @@ export const useSessionStore = create<State>((set, get) => ({
         }
       }),
     }))
+  },
+
+  // ─── Orchestration Actions ───
+
+  orchDefineAgents: async (tabId, agents) => {
+    await window.clui.orchDefineAgents(tabId, agents)
+
+    // Build initial AgentState records
+    const agentStates: Record<string, AgentState> = {}
+    for (const agent of agents) {
+      agentStates[agent.id] = {
+        id: agent.id,
+        tabId,
+        role: agent.role,
+        name: agent.name,
+        status: 'idle',
+        activeRequestId: null,
+        claudeSessionId: null,
+        messages: [],
+        permissionQueue: [],
+        currentActivity: '',
+        lastResult: null,
+        costUsd: 0,
+      }
+    }
+
+    const primaryId = agents.find((a) => a.role === 'orchestrator')?.id ?? agents[0].id
+
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              orchestrationMode: 'multi' as const,
+              agentDefinitions: agents,
+              agentStates,
+              primaryAgentId: primaryId,
+            }
+          : t
+      ),
+    }))
+  },
+
+  orchStart: async (prompt, projectPath) => {
+    const { activeTabId } = get()
+    try {
+      await window.clui.orchStart(activeTabId, prompt, projectPath)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === activeTabId
+            ? {
+                ...t,
+                messages: [
+                  ...t.messages,
+                  { id: nextMsgId(), role: 'system' as const, content: `Orchestration error: ${msg}`, timestamp: Date.now() },
+                ],
+              }
+            : t
+        ),
+      }))
+    }
+  },
+
+  orchCancelAgent: (agentId) => {
+    const { activeTabId } = get()
+    window.clui.orchCancelAgent(activeTabId, agentId).catch(() => {})
+  },
+
+  orchCancelAll: () => {
+    const { activeTabId } = get()
+    window.clui.orchCancelAll(activeTabId).catch(() => {})
+  },
+
+  orchRespondPermission: (agentId, questionId, optionId) => {
+    const { activeTabId } = get()
+    window.clui.orchRespondPermission(activeTabId, agentId, questionId, optionId).catch(() => {})
+
+    // Remove from the agent's permission queue
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== activeTabId) return t
+        const agent = t.agentStates[agentId]
+        if (!agent) return t
+        const remaining = agent.permissionQueue.filter((p) => p.questionId !== questionId)
+        return {
+          ...t,
+          agentStates: {
+            ...t.agentStates,
+            [agentId]: {
+              ...agent,
+              permissionQueue: remaining,
+              currentActivity: remaining.length > 0
+                ? `Waiting for permission: ${remaining[0].toolTitle}`
+                : 'Working...',
+            },
+          },
+        }
+      }),
+    }))
+  },
+
+  handleAgentEvent: (tabId, agentId, event) => {
+    set((s) => {
+      const tabs = s.tabs.map((tab) => {
+        if (tab.id !== tabId) return tab
+        const agent = tab.agentStates[agentId]
+        if (!agent) return tab
+
+        const updatedAgent = { ...agent }
+
+        switch (event.type) {
+          case 'text_chunk': {
+            updatedAgent.currentActivity = 'Writing...'
+            const lastMsg = updatedAgent.messages[updatedAgent.messages.length - 1]
+            if (lastMsg?.role === 'assistant' && !lastMsg.toolName) {
+              updatedAgent.messages = [
+                ...updatedAgent.messages.slice(0, -1),
+                { ...lastMsg, content: lastMsg.content + event.text, agentId },
+              ]
+            } else {
+              updatedAgent.messages = [
+                ...updatedAgent.messages,
+                { id: nextMsgId(), role: 'assistant', content: event.text, timestamp: Date.now(), agentId },
+              ]
+            }
+            break
+          }
+
+          case 'tool_call':
+            updatedAgent.currentActivity = `Running ${event.toolName}...`
+            updatedAgent.messages = [
+              ...updatedAgent.messages,
+              {
+                id: nextMsgId(),
+                role: 'tool',
+                content: '',
+                toolName: event.toolName,
+                toolInput: '',
+                toolStatus: 'running',
+                timestamp: Date.now(),
+                agentId,
+              },
+            ]
+            break
+
+          case 'tool_call_complete': {
+            const msgs = [...updatedAgent.messages]
+            const runningTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
+            if (runningTool) {
+              runningTool.toolStatus = 'completed'
+            }
+            updatedAgent.messages = msgs
+            break
+          }
+
+          case 'task_complete':
+            updatedAgent.status = 'completed'
+            updatedAgent.currentActivity = ''
+            updatedAgent.costUsd += event.costUsd
+            updatedAgent.lastResult = {
+              totalCostUsd: event.costUsd,
+              durationMs: event.durationMs,
+              numTurns: event.numTurns,
+              usage: event.usage,
+              sessionId: event.sessionId,
+            }
+            break
+
+          case 'permission_request': {
+            const newReq: import('../../shared/types').PermissionRequest = {
+              questionId: event.questionId,
+              toolTitle: event.toolName,
+              toolDescription: event.toolDescription,
+              toolInput: event.toolInput,
+              options: event.options.map((o: { id: string; kind?: string; label: string }) => ({
+                optionId: o.id,
+                kind: o.kind,
+                label: o.label,
+              })),
+              agentId: event.agentId,
+              agentName: event.agentName,
+            }
+            updatedAgent.permissionQueue = [...updatedAgent.permissionQueue, newReq]
+            updatedAgent.currentActivity = `Waiting for permission: ${event.toolName}`
+            break
+          }
+
+          case 'error':
+            updatedAgent.status = 'failed'
+            updatedAgent.currentActivity = ''
+            updatedAgent.messages = [
+              ...updatedAgent.messages,
+              { id: nextMsgId(), role: 'system', content: `Error: ${event.message}`, timestamp: Date.now(), agentId },
+            ]
+            break
+        }
+
+        return {
+          ...tab,
+          agentStates: { ...tab.agentStates, [agentId]: updatedAgent },
+        }
+      })
+
+      return { tabs }
+    })
   },
 }))
 

@@ -117,6 +117,40 @@ export interface UnknownEvent {
   [key: string]: unknown
 }
 
+// ─── Orchestration Mode Types ───
+
+export type AgentRole = 'orchestrator' | 'worker' | 'researcher' | 'implementer' | 'reviewer' | 'custom'
+
+export type AgentStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+export type OrchestrationMode = 'single' | 'multi'
+
+export interface AgentDefinition {
+  id: string
+  role: AgentRole
+  name: string
+  systemPrompt?: string
+  model?: string
+  allowedTools?: string[]
+  maxTurns?: number
+}
+
+export interface AgentState {
+  id: string
+  tabId: string
+  role: AgentRole
+  name: string
+  status: AgentStatus
+  activeRequestId: string | null
+  claudeSessionId: string | null
+  messages: Message[]
+  permissionQueue: PermissionRequest[]
+  currentActivity: string
+  lastResult: RunResult | null
+  /** Cumulative cost for this agent */
+  costUsd: number
+}
+
 // ─── Tab State Machine (v2 — from execution plan) ───
 
 export type TabStatus = 'connecting' | 'idle' | 'running' | 'completed' | 'failed' | 'dead'
@@ -127,6 +161,9 @@ export interface PermissionRequest {
   toolDescription?: string
   toolInput?: Record<string, unknown>
   options: Array<{ optionId: string; kind?: string; label: string }>
+  /** Agent that triggered this permission (orchestration mode only) */
+  agentId?: string
+  agentName?: string
 }
 
 export interface Attachment {
@@ -172,6 +209,14 @@ export interface TabState {
   hasChosenDirectory: boolean
   /** Extra directories accessible via --add-dir (session-preserving) */
   additionalDirs: string[]
+  /** Orchestration mode: 'single' (default) or 'multi' (concurrent agents) */
+  orchestrationMode: OrchestrationMode
+  /** Agent definitions for this tab (only when orchestrationMode === 'multi') */
+  agentDefinitions: AgentDefinition[]
+  /** Per-agent runtime state, keyed by agentId */
+  agentStates: Record<string, AgentState>
+  /** Which agent's messages are currently displayed in ConversationView */
+  primaryAgentId: string | null
 }
 
 export interface Message {
@@ -182,6 +227,8 @@ export interface Message {
   toolInput?: string
   toolStatus?: 'running' | 'completed' | 'error'
   timestamp: number
+  /** Agent that produced this message (orchestration mode only) */
+  agentId?: string
 }
 
 export interface RunResult {
@@ -210,7 +257,11 @@ export type NormalizedEvent =
   | { type: 'session_dead'; exitCode: number | null; signal: string | null; stderrTail: string[] }
   | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
   | { type: 'usage'; usage: UsageData }
-  | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
+  | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }>; agentId?: string; agentName?: string }
+  // Orchestration-specific events
+  | { type: 'agent_status_change'; agentId: string; agentName: string; newStatus: AgentStatus; oldStatus: AgentStatus }
+  | { type: 'agent_task_complete'; agentId: string; agentName: string; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string }
+  | { type: 'orchestration_complete'; totalCostUsd: number; agentCosts: Record<string, number> }
 
 // ─── Run Options ───
 
@@ -242,6 +293,14 @@ export interface TabRegistryEntry {
   createdAt: number
   lastActivityAt: number
   promptCount: number
+  /** Orchestration mode for this tab */
+  orchestrationMode: OrchestrationMode
+  /** All active agent requestIds (orchestration mode) */
+  activeAgentRequests: Map<string, string>  // agentId → requestId
+  /** Per-agent session IDs */
+  agentSessions: Map<string, string | null>  // agentId → sessionId
+  /** Agent definitions (set at orchestration start) */
+  agentDefinitions: AgentDefinition[]
 }
 
 export interface HealthReport {
@@ -367,6 +426,17 @@ export const IPC = {
 
   // Permission mode
   SET_PERMISSION_MODE: 'clui:set-permission-mode',
+
+  // Orchestration mode (multi-agent)
+  ORCH_DEFINE_AGENTS: 'clui:orch-define-agents',
+  ORCH_START: 'clui:orch-start',
+  ORCH_CANCEL_AGENT: 'clui:orch-cancel-agent',
+  ORCH_CANCEL_ALL: 'clui:orch-cancel-all',
+  ORCH_RESPOND_PERMISSION: 'clui:orch-respond-permission',
+  // Orchestration events (main → renderer)
+  ORCH_AGENT_EVENT: 'clui:orch-agent-event',
+  ORCH_AGENT_STATUS: 'clui:orch-agent-status',
+  ORCH_AGENT_ERROR: 'clui:orch-agent-error',
 
   // Prompt improvement (Haiku)
   PROMPT_IMPROVE: 'clui:prompt-improve',

@@ -3,6 +3,7 @@ import { RunManager } from './run-manager'
 import { PtyRunManager } from './pty-run-manager'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
+import { applyDefaults } from './agent-defaults'
 import { log as _log } from '../logger'
 import type {
   TabStatus,
@@ -11,6 +12,9 @@ import type {
   NormalizedEvent,
   RunOptions,
   EnrichedError,
+  AgentDefinition,
+  AgentStatus,
+  OrchestrationMode,
 } from '../../shared/types'
 
 const MAX_QUEUE_DEPTH = 32
@@ -75,6 +79,15 @@ export class ControlPlane extends EventEmitter {
   private permissionMode: 'ask' | 'auto' = 'ask'
   /** Resolves when the permission server is ready (or failed). Dispatch awaits this. */
   private hookServerReady: Promise<void>
+
+  // ─── Orchestration state ───
+
+  /** Maps requestId → agent metadata (for multi-agent event routing) */
+  private requestToAgent = new Map<string, { agentId: string; agentName: string; tabId: string; isOrchestrator: boolean }>()
+  /** Max concurrent agent processes across all tabs */
+  private static readonly MAX_CONCURRENT_AGENTS = 5
+  /** Currently running agent count (for semaphore) */
+  private activeAgentCount = 0
 
   constructor(interactivePty = false) {
     super()
@@ -145,12 +158,20 @@ export class ControlPlane extends EventEmitter {
 
       tab.lastActivityAt = Date.now()
 
+      // ─── Agent-aware event routing ───
+      const agentMeta = this.requestToAgent.get(requestId)
+
       // Handle session init
       if (event.type === 'session_init') {
-        tab.claudeSessionId = event.sessionId
+        if (agentMeta) {
+          // Agent run: store per-agent session ID
+          tab.agentSessions.set(agentMeta.agentId, event.sessionId)
+        } else {
+          // Single-agent: store on tab
+          tab.claudeSessionId = event.sessionId
+        }
 
         if (this.initRequestIds.has(requestId)) {
-          // Warmup init — emit session_init with isWarmup flag, don't change status
           this.emit('event', tabId, { ...event, isWarmup: true })
           return
         }
@@ -162,6 +183,22 @@ export class ControlPlane extends EventEmitter {
 
       // Suppress all events from init requests (session_init already handled above)
       if (this.initRequestIds.has(requestId)) {
+        return
+      }
+
+      // Tag permission requests with agent info
+      if (agentMeta && event.type === 'permission_request') {
+        this.emit('event', tabId, {
+          ...event,
+          agentId: agentMeta.agentId,
+          agentName: agentMeta.agentName,
+        })
+        return
+      }
+
+      // For orchestration runs, wrap events for the renderer via ORCH_AGENT_EVENT
+      if (agentMeta) {
+        this.emit('event', tabId, event, agentMeta.agentId)
         return
       }
 
@@ -177,22 +214,68 @@ export class ControlPlane extends EventEmitter {
       }
 
       const tabId = this._findTabByRequest(requestId)
+      const agentMeta = this.requestToAgent.get(requestId)
 
       // Always clean up inflight promise, even if tab was already closed.
-      // This prevents leaked promises when closeTab() races with process exit.
       const inflight = this.inflightRequests.get(requestId)
 
       if (!tabId || !this.tabs.get(tabId)) {
-        // Tab was already closed — just resolve/reject the orphaned promise
         if (inflight) {
           inflight.resolve()
           this.inflightRequests.delete(requestId)
         }
+        if (agentMeta) this.requestToAgent.delete(requestId)
         return
       }
 
       const tab = this.tabs.get(tabId)!
 
+      // ─── Agent-aware exit handling ───
+      if (agentMeta) {
+        this.activeAgentCount = Math.max(0, this.activeAgentCount - 1)
+
+        // Clean up agent tracking
+        tab.activeAgentRequests.delete(agentMeta.agentId)
+        this.requestToAgent.delete(requestId)
+
+        if (sessionId) {
+          tab.agentSessions.set(agentMeta.agentId, sessionId)
+        }
+
+        const newStatus: AgentStatus = code === 0 ? 'completed'
+          : (signal === 'SIGINT' || signal === 'SIGKILL') ? 'cancelled'
+          : 'failed'
+
+        // Emit agent status change
+        this.emit('event', tabId, {
+          type: 'agent_status_change',
+          agentId: agentMeta.agentId,
+          agentName: agentMeta.agentName,
+          newStatus,
+          oldStatus: 'running' as AgentStatus,
+        })
+
+        if (newStatus === 'failed') {
+          const enriched = this.runManager.getEnrichedError(requestId, code)
+          this.emit('event', tabId, {
+            type: 'error',
+            message: enriched.message || `Agent ${agentMeta.agentName} failed`,
+            isError: true,
+          })
+        }
+
+        // Resolve the inflight promise
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+
+        // Check if all agents are done
+        this._checkOrchestrationComplete(tabId)
+        return
+      }
+
+      // ─── Single-agent exit handling (original logic) ───
       tab.activeRequestId = null
       tab.runPid = null
 
@@ -213,22 +296,18 @@ export class ControlPlane extends EventEmitter {
       if (code === 0) {
         this._setTabStatus(tabId, 'completed')
       } else if (signal === 'SIGINT' || signal === 'SIGKILL') {
-        // Cancelled by user
         this._setTabStatus(tabId, 'failed')
       } else {
-        // Unexpected exit — emit enriched error (includes stderr tail)
         const enriched = this.runManager.getEnrichedError(requestId, code)
         this.emit('error', tabId, enriched)
         this._setTabStatus(tabId, code === null ? 'dead' : 'failed')
       }
 
-      // Resolve the inflight promise
       if (inflight) {
         inflight.resolve()
         this.inflightRequests.delete(requestId)
       }
 
-      // Process next queued request for this tab
       this._processQueue(tabId)
     })
 
@@ -241,6 +320,7 @@ export class ControlPlane extends EventEmitter {
       }
 
       const tabId = this._findTabByRequest(requestId)
+      const agentMeta = this.requestToAgent.get(requestId)
 
       // Always clean up inflight even if tab is gone
       const inflight = this.inflightRequests.get(requestId)
@@ -250,14 +330,46 @@ export class ControlPlane extends EventEmitter {
           inflight.reject(err)
           this.inflightRequests.delete(requestId)
         }
+        if (agentMeta) this.requestToAgent.delete(requestId)
         return
       }
 
       const tab = this.tabs.get(tabId)!
+
+      // ─── Agent-aware error handling ───
+      if (agentMeta) {
+        this.activeAgentCount = Math.max(0, this.activeAgentCount - 1)
+
+        tab.activeAgentRequests.delete(agentMeta.agentId)
+        this.requestToAgent.delete(requestId)
+
+        this.emit('event', tabId, {
+          type: 'agent_status_change',
+          agentId: agentMeta.agentId,
+          agentName: agentMeta.agentName,
+          newStatus: 'failed' as AgentStatus,
+          oldStatus: 'running' as AgentStatus,
+        })
+
+        this.emit('event', tabId, {
+          type: 'error',
+          message: `Agent ${agentMeta.agentName}: ${err.message}`,
+          isError: true,
+        })
+
+        if (inflight) {
+          inflight.reject(err)
+          this.inflightRequests.delete(requestId)
+        }
+
+        this._checkOrchestrationComplete(tabId)
+        return
+      }
+
+      // ─── Single-agent error handling (original logic) ───
       tab.activeRequestId = null
       tab.runPid = null
 
-      // Init request: silently fail, go idle so user can still use the tab
       if (this.initRequestIds.has(requestId)) {
         this.initRequestIds.delete(requestId)
         log(`Init session error for tab ${tabId}: ${err.message}`)
@@ -272,8 +384,6 @@ export class ControlPlane extends EventEmitter {
 
       this._setTabStatus(tabId, 'dead')
 
-      // Use enriched diagnostics — _finishedRuns holds the handle with
-      // stderr/stdout ring buffers even after the process errored out.
       const enriched = this.runManager.getEnrichedError(requestId, null)
       enriched.message = err.message
       this.emit('error', tabId, enriched)
@@ -440,6 +550,10 @@ export class ControlPlane extends EventEmitter {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       promptCount: 0,
+      orchestrationMode: 'single',
+      activeAgentRequests: new Map(),
+      agentSessions: new Map(),
+      agentDefinitions: [],
     }
     this.tabs.set(tabId, entry)
     log(`Tab created: ${tabId}`)
@@ -491,18 +605,29 @@ export class ControlPlane extends EventEmitter {
     const tab = this.tabs.get(tabId)
     if (!tab) return
 
-    // Cancel active run if any
+    // Cancel active single-agent run if any
     if (tab.activeRequestId) {
       this.cancel(tab.activeRequestId)
 
-      // Resolve and clean up the inflight promise so it doesn't leak.
-      // The exit handler may never fire for this tab since we're deleting it.
       const inflight = this.inflightRequests.get(tab.activeRequestId)
       if (inflight) {
         inflight.reject(new Error('Tab closed'))
         this.inflightRequests.delete(tab.activeRequestId)
       }
     }
+
+    // Cancel all orchestration agent runs
+    for (const [agentId, requestId] of tab.activeAgentRequests) {
+      this.cancel(requestId)
+      this.requestToAgent.delete(requestId)
+
+      const inflight = this.inflightRequests.get(requestId)
+      if (inflight) {
+        inflight.reject(new Error('Tab closed'))
+        this.inflightRequests.delete(requestId)
+      }
+    }
+    tab.activeAgentRequests.clear()
 
     // Remove queued requests for this tab, rejecting all waiters
     this.requestQueue = this.requestQueue.filter((r) => {
@@ -792,6 +917,10 @@ export class ControlPlane extends EventEmitter {
     const inflight = this.inflightRequests.get(requestId)
     if (inflight) return inflight.tabId
 
+    // Check orchestration agent mapping
+    const agentMeta = this.requestToAgent.get(requestId)
+    if (agentMeta) return agentMeta.tabId
+
     // Also check registry entries
     for (const [tabId, tab] of this.tabs) {
       if (tab.activeRequestId === requestId) return tabId
@@ -810,6 +939,273 @@ export class ControlPlane extends EventEmitter {
     tab.status = newStatus
     log(`Tab ${tabId}: ${oldStatus} → ${newStatus}`)
     this.emit('tab-status-change', tabId, newStatus, oldStatus)
+  }
+
+  // ─── Orchestration Mode ───
+
+  /**
+   * Define agent configurations for a tab. Must be called before startOrchestration().
+   * Applies role-based defaults for any missing fields.
+   */
+  defineAgents(tabId: string, agents: AgentDefinition[]): void {
+    const tab = this.tabs.get(tabId)
+    if (!tab) throw new Error(`Tab ${tabId} does not exist`)
+
+    if (tab.activeRequestId || tab.activeAgentRequests.size > 0) {
+      throw new Error(`Tab ${tabId} has active runs — cannot redefine agents`)
+    }
+
+    // Validate: at least one agent, and exactly one orchestrator if >1 agent
+    if (agents.length === 0) {
+      throw new Error('At least one agent definition is required')
+    }
+
+    const orchestrators = agents.filter((a) => a.role === 'orchestrator')
+    if (agents.length > 1 && orchestrators.length !== 1) {
+      throw new Error(`Multi-agent mode requires exactly one orchestrator (found ${orchestrators.length})`)
+    }
+
+    // Apply role-based defaults
+    const enriched = agents.map((a) => {
+      const defaults = applyDefaults(a)
+      return {
+        ...a,
+        systemPrompt: a.systemPrompt || defaults.systemPrompt,
+        allowedTools: a.allowedTools ?? defaults.allowedTools,
+        maxTurns: a.maxTurns ?? defaults.maxTurns,
+      }
+    })
+
+    tab.agentDefinitions = enriched
+    tab.orchestrationMode = agents.length > 1 ? 'multi' : 'single'
+
+    log(`Tab ${tabId}: defined ${enriched.length} agents (mode=${tab.orchestrationMode})`)
+  }
+
+  /**
+   * Start orchestration: spawn all defined agents concurrently.
+   * Each agent gets its own requestId, session, and run process.
+   * The orchestrator agent receives the user prompt; worker agents receive
+   * a system-generated task prompt.
+   */
+  async startOrchestration(
+    tabId: string,
+    prompt: string,
+    projectPath: string,
+  ): Promise<void> {
+    const tab = this.tabs.get(tabId)
+    if (!tab) throw new Error(`Tab ${tabId} does not exist`)
+
+    if (tab.agentDefinitions.length === 0) {
+      throw new Error(`Tab ${tabId}: no agents defined — call defineAgents() first`)
+    }
+
+    if (tab.orchestrationMode !== 'multi') {
+      throw new Error(`Tab ${tabId}: orchestration mode is '${tab.orchestrationMode}', not 'multi'`)
+    }
+
+    // Prevent double-start
+    if (tab.activeAgentRequests.size > 0) {
+      throw new Error(`Tab ${tabId}: orchestration already running`)
+    }
+
+    // Check global agent limit
+    const requestedCount = tab.agentDefinitions.length
+    if (this.activeAgentCount + requestedCount > ControlPlane.MAX_CONCURRENT_AGENTS) {
+      throw new Error(
+        `Cannot start ${requestedCount} agents — would exceed limit of ${ControlPlane.MAX_CONCURRENT_AGENTS} ` +
+        `(${this.activeAgentCount} already running)`
+      )
+    }
+
+    this._setTabStatus(tabId, 'running')
+
+    const launchPromises: Promise<void>[] = []
+
+    for (const agent of tab.agentDefinitions) {
+      const requestId = `orch-${tabId.substring(0, 8)}-${agent.id}`
+      const isOrchestrator = agent.role === 'orchestrator'
+
+      // Register agent→request mapping
+      this.requestToAgent.set(requestId, {
+        agentId: agent.id,
+        agentName: agent.name,
+        tabId,
+        isOrchestrator,
+      })
+
+      tab.activeAgentRequests.set(agent.id, requestId)
+
+      // Build agent-specific RunOptions
+      const agentPrompt = isOrchestrator
+        ? prompt
+        : `You are agent "${agent.name}" (role: ${agent.role}). Await instructions from the orchestrator. The user's original request was: ${prompt}`
+
+      const agentOptions: RunOptions = {
+        prompt: agentPrompt,
+        projectPath,
+        systemPrompt: agent.systemPrompt,
+        model: agent.model,
+        allowedTools: agent.allowedTools,
+        maxTurns: agent.maxTurns,
+      }
+
+      // Emit initial status
+      this.emit('event', tabId, {
+        type: 'agent_status_change',
+        agentId: agent.id,
+        agentName: agent.name,
+        newStatus: 'running' as AgentStatus,
+        oldStatus: 'idle' as AgentStatus,
+      })
+
+      // Dispatch each agent as an independent run (bypasses single-request guard)
+      const p = this._dispatchAgentRun(tabId, requestId, agentOptions)
+      launchPromises.push(p)
+    }
+
+    // Don't await all — they run concurrently. Errors are handled per-agent.
+    for (const p of launchPromises) {
+      p.catch((err) => {
+        log(`Agent launch error: ${(err as Error).message}`)
+      })
+    }
+  }
+
+  /**
+   * Dispatch a single agent run. Similar to _dispatch() but:
+   * - Doesn't set tab.activeRequestId (multiple agents run concurrently)
+   * - Routes through the same RunManager
+   */
+  private async _dispatchAgentRun(
+    tabId: string,
+    requestId: string,
+    options: RunOptions,
+  ): Promise<void> {
+    const tab = this.tabs.get(tabId)
+    if (!tab) throw new Error(`Tab ${tabId} disappeared`)
+
+    await this.hookServerReady
+
+    // Per-run token for permission server
+    if (this.permissionServer.getPort()) {
+      const runToken = this.permissionServer.registerRun(tabId, requestId, options.sessionId || null)
+      this.runTokens.set(requestId, runToken)
+      const hookSettingsPath = this.permissionServer.generateSettingsFile(runToken)
+      options = { ...options, hookSettingsPath }
+    }
+
+    tab.lastActivityAt = Date.now()
+
+    this.activeAgentCount++
+
+    try {
+      const handle = this.runManager.startRun(requestId, options)
+      // Store agent session mapping
+      const agentMeta = this.requestToAgent.get(requestId)
+      if (agentMeta) {
+        tab.agentSessions.set(agentMeta.agentId, null)  // Will be populated on session_init
+      }
+    } catch (err) {
+      this.activeAgentCount--
+      // Clean up on start failure
+      const agentMeta = this.requestToAgent.get(requestId)
+      this.requestToAgent.delete(requestId)
+      if (agentMeta) {
+        tab.activeAgentRequests.delete(agentMeta.agentId)
+      }
+      throw err
+    }
+
+    // Create inflight promise for this agent run
+    let resolve!: (value: void) => void
+    let reject!: (reason: Error) => void
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+
+    this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve, reject })
+    return promise
+  }
+
+  /**
+   * Cancel a specific agent within an orchestration.
+   */
+  cancelAgent(tabId: string, agentId: string): boolean {
+    const tab = this.tabs.get(tabId)
+    if (!tab) return false
+
+    const requestId = tab.activeAgentRequests.get(agentId)
+    if (!requestId) return false
+
+    log(`Cancelling agent ${agentId} (request=${requestId})`)
+    return this.cancel(requestId)
+  }
+
+  /**
+   * Cancel ALL agents in an orchestration tab.
+   */
+  cancelAllAgents(tabId: string): boolean {
+    const tab = this.tabs.get(tabId)
+    if (!tab) return false
+
+    let cancelled = false
+    for (const [agentId, requestId] of tab.activeAgentRequests) {
+      log(`Cancelling agent ${agentId} (request=${requestId})`)
+      if (this.cancel(requestId)) cancelled = true
+    }
+
+    return cancelled
+  }
+
+  /**
+   * Respond to a permission request from a specific agent.
+   */
+  respondToAgentPermission(tabId: string, agentId: string, questionId: string, optionId: string): boolean {
+    // Hook-based permissions work the same regardless of agent
+    if (questionId.startsWith('hook-')) {
+      return this.permissionServer.respondToPermission(questionId, optionId)
+    }
+
+    const tab = this.tabs.get(tabId)
+    if (!tab) return false
+
+    const requestId = tab.activeAgentRequests.get(agentId)
+    if (!requestId) return false
+
+    const msg = {
+      type: 'permission_response',
+      question_id: questionId,
+      option_id: optionId,
+    }
+    return this.runManager.writeToStdin(requestId, msg)
+  }
+
+  /**
+   * Check if an orchestration is fully complete (all agents done).
+   * If so, emit orchestration_complete and set tab to completed/failed.
+   */
+  private _checkOrchestrationComplete(tabId: string): void {
+    const tab = this.tabs.get(tabId)
+    if (!tab || tab.orchestrationMode !== 'multi') return
+
+    // Still have active agents?
+    if (tab.activeAgentRequests.size > 0) return
+
+    // All agents done — calculate totals
+    // (Individual agent costs are tracked by the renderer via agent_task_complete events)
+    log(`Tab ${tabId}: all agents completed — orchestration done`)
+
+    this.emit('event', tabId, {
+      type: 'orchestration_complete',
+      totalCostUsd: 0,  // Renderer accumulates from individual agent_task_complete events
+      agentCosts: {},
+    })
+
+    // Tab status depends on whether the orchestrator succeeded
+    // For now, mark as completed (renderer can show per-agent status)
+    this._setTabStatus(tabId, 'completed')
   }
 
   // ─── Shutdown ───

@@ -14,6 +14,7 @@ export function useClaudeEvents() {
   const handleNormalizedEvent = useSessionStore((s) => s.handleNormalizedEvent)
   const handleStatusChange = useSessionStore((s) => s.handleStatusChange)
   const handleError = useSessionStore((s) => s.handleError)
+  const handleAgentEvent = useSessionStore((s) => s.handleAgentEvent)
 
   // RAF batching for text_chunk events
   const chunkBufferRef = useRef<Map<string, string>>(new Map())
@@ -106,15 +107,21 @@ export function useClaudeEvents() {
       }
     })
 
+    // Orchestration: per-agent events via dedicated channel
+    const unsubAgent = window.clui.onAgentEvent((tabId, agentId, event) => {
+      handleAgentEvent(tabId, agentId, event)
+    })
+
     return () => {
       unsubEvent()
       unsubStatus()
       unsubError()
       unsubSkill()
+      unsubAgent()
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
       chunkBufferRef.current.clear()
     }
-  }, [handleNormalizedEvent, handleStatusChange, handleError])
+  }, [handleNormalizedEvent, handleStatusChange, handleError, handleAgentEvent])
 
   // Note: window.clui.start() is called via sessionStore.initStaticInfo() in App.tsx.
   // No duplicate call needed here.

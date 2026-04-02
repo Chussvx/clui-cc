@@ -10,6 +10,7 @@ import {
 import { useSessionStore } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
+import { AgentStatusPanel } from './AgentStatusPanel'
 import { useColors, useThemeStore } from '../theme'
 import type { Message } from '../../shared/types'
 
@@ -186,9 +187,14 @@ export function ConversationView() {
           })}
         </div>
 
-        {/* Permission card (shows first item from queue) */}
+        {/* Agent status panel (orchestration mode) */}
+        {tab.orchestrationMode === 'multi' && Object.keys(tab.agentStates).length > 0 && (
+          <AgentStatusPanel tabId={tab.id} agentStates={tab.agentStates} />
+        )}
+
+        {/* Permission card (shows first item from queue — single-agent mode only) */}
         <AnimatePresence>
-          {tab.permissionQueue.length > 0 && (
+          {tab.orchestrationMode === 'single' && tab.permissionQueue.length > 0 && (
             <PermissionCard
               tabId={tab.id}
               permission={tab.permissionQueue[0]}

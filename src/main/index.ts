@@ -117,7 +117,12 @@ function scheduleToggleSnapshots(toggleId: number, phase: 'show' | 'hide'): void
 
 // ─── Wire ControlPlane events → renderer ───
 
-controlPlane.on('event', (tabId: string, event: NormalizedEvent) => {
+controlPlane.on('event', (tabId: string, event: NormalizedEvent, agentId?: string) => {
+  if (agentId) {
+    // Orchestration: route agent-specific events through dedicated channel
+    broadcast(IPC.ORCH_AGENT_EVENT, tabId, agentId, event)
+  }
+  // Always broadcast on the unified channel (renderer decides what to display)
   broadcast('clui:normalized-event', tabId, event)
 })
 
@@ -430,6 +435,33 @@ ipcMain.on(IPC.SET_PERMISSION_MODE, (_event, mode: string) => {
 ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }: { tabId: string; questionId: string; optionId: string }) => {
   log(`IPC RESPOND_PERMISSION: tab=${tabId} question=${questionId} option=${optionId}`)
   return controlPlane.respondToPermission(tabId, questionId, optionId)
+})
+
+// ─── Orchestration Mode IPC ───
+
+ipcMain.handle(IPC.ORCH_DEFINE_AGENTS, (_event, { tabId, agents }: { tabId: string; agents: import('../shared/types').AgentDefinition[] }) => {
+  log(`IPC ORCH_DEFINE_AGENTS: tab=${tabId} agents=${agents.length}`)
+  controlPlane.defineAgents(tabId, agents)
+})
+
+ipcMain.handle(IPC.ORCH_START, async (_event, { tabId, prompt, projectPath }: { tabId: string; prompt: string; projectPath: string }) => {
+  log(`IPC ORCH_START: tab=${tabId}`)
+  return controlPlane.startOrchestration(tabId, prompt, projectPath)
+})
+
+ipcMain.handle(IPC.ORCH_CANCEL_AGENT, (_event, { tabId, agentId }: { tabId: string; agentId: string }) => {
+  log(`IPC ORCH_CANCEL_AGENT: tab=${tabId} agent=${agentId}`)
+  return controlPlane.cancelAgent(tabId, agentId)
+})
+
+ipcMain.handle(IPC.ORCH_CANCEL_ALL, (_event, tabId: string) => {
+  log(`IPC ORCH_CANCEL_ALL: tab=${tabId}`)
+  return controlPlane.cancelAllAgents(tabId)
+})
+
+ipcMain.handle(IPC.ORCH_RESPOND_PERMISSION, (_event, { tabId, agentId, questionId, optionId }: { tabId: string; agentId: string; questionId: string; optionId: string }) => {
+  log(`IPC ORCH_RESPOND_PERMISSION: tab=${tabId} agent=${agentId} question=${questionId}`)
+  return controlPlane.respondToAgentPermission(tabId, agentId, questionId, optionId)
 })
 
 ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
