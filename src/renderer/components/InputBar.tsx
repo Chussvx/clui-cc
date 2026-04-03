@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad, Lightning } from '@phosphor-icons/react'
+import { Microphone, ArrowUp, SpinnerGap, X, Check, Notepad, Lightning, Paperclip, Camera } from '@phosphor-icons/react'
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
@@ -11,7 +11,7 @@ const INPUT_MIN_HEIGHT = 20
 const INPUT_MAX_HEIGHT = 140
 const MULTILINE_ENTER_HEIGHT = 52
 const MULTILINE_EXIT_HEIGHT = 50
-const INLINE_CONTROLS_RESERVED_WIDTH = 104
+const INLINE_CONTROLS_RESERVED_WIDTH = 170
 
 type VoiceState = 'idle' | 'recording' | 'transcribing'
 
@@ -19,7 +19,7 @@ type VoiceState = 'idle' | 'recording' | 'transcribing'
  * InputBar renders inside a glass-surface rounded-full pill provided by App.tsx.
  * It provides: textarea + mic/send buttons. Attachment chips render above when present.
  */
-export function InputBar() {
+export function InputBar({ onAttachFile, onScreenshot, isRunning }: { onAttachFile: () => void; onScreenshot: () => void; isRunning: boolean }) {
   const [input, setInput] = useState('')
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [voiceError, setVoiceError] = useState<string | null>(null)
@@ -414,7 +414,38 @@ export function InputBar() {
       {/* Single-line: inline controls. Multi-line: controls in bottom row */}
       <div className="w-full" style={{ minHeight: 50 }}>
         {isMultiLine ? (
-          <div className="w-full">
+          <div className="flex w-full gap-1 pb-2">
+            {/* Left action buttons for multiline */}
+            <div className="flex items-start gap-1 shrink-0 pt-2">
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onAttachFile}
+                disabled={isRunning}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                style={{
+                  background: colors.surfaceHover,
+                  color: colors.textTertiary,
+                }}
+                title="Attach file"
+              >
+                <Paperclip size={16} />
+              </button>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onScreenshot}
+                disabled={isRunning}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                style={{
+                  background: colors.surfaceHover,
+                  color: colors.textTertiary,
+                }}
+                title="Take screenshot"
+              >
+                <Camera size={16} />
+              </button>
+            </div>
+
+            <div className="w-full">
             <textarea
               ref={textareaRef}
               value={input}
@@ -497,9 +528,40 @@ export function InputBar() {
                 )}
               </AnimatePresence>
             </div>
+            </div>
           </div>
         ) : (
           <div className="flex items-center w-full" style={{ minHeight: 50 }}>
+            {/* Left action buttons */}
+            <div className="flex items-center gap-1 shrink-0 mr-1">
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onAttachFile}
+                disabled={isRunning}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                style={{
+                  background: colors.surfaceHover,
+                  color: colors.textTertiary,
+                }}
+                title="Attach file"
+              >
+                <Paperclip size={16} />
+              </button>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onScreenshot}
+                disabled={isRunning}
+                className="w-9 h-9 rounded-full flex items-center justify-center transition-colors disabled:opacity-40"
+                style={{
+                  background: colors.surfaceHover,
+                  color: colors.textTertiary,
+                }}
+                title="Take screenshot"
+              >
+                <Camera size={16} />
+              </button>
+            </div>
+
             <textarea
               ref={textareaRef}
               value={input}

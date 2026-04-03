@@ -1,6 +1,6 @@
 import React, { useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Paperclip, Camera, HeadCircuit, Terminal as TerminalIcon } from '@phosphor-icons/react'
+import { HeadCircuit, Terminal as TerminalIcon, Lightning } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
 import { ConversationView } from './components/ConversationView'
 import { InputBar } from './components/InputBar'
@@ -10,6 +10,7 @@ import { NotificationPanel } from './components/NotificationPanel'
 import { CostDashboardPanel } from './components/CostDashboardPanel'
 import { VisualizationPanel } from './components/VisualizationPanel'
 import { MemoryPanel } from './components/MemoryPanel'
+import { McpPanel } from './components/McpPanel'
 import { WidgetPopup } from './components/WidgetBlock'
 import { TerminalPanel } from './components/TerminalPanel'
 import { PopoverLayerProvider } from './components/PopoverLayer'
@@ -314,7 +315,7 @@ export default function App() {
 
           {/* ─── Notification / Cost / Visualizations panels ─── */}
           <AnimatePresence>
-            {(activePanel === 'notifications' || activePanel === 'cost' || activePanel === 'visualizations' || activePanel === 'memory') && (
+            {(activePanel === 'notifications' || activePanel === 'cost' || activePanel === 'visualizations' || activePanel === 'memory' || activePanel === 'mcp') && (
               <>
                 {/* Invisible backdrop — click to close */}
                 <div
@@ -354,6 +355,9 @@ export default function App() {
                     )}
                     {activePanel === 'memory' && (
                       <MemoryPanel onClose={() => togglePanel('memory')} />
+                    )}
+                    {activePanel === 'mcp' && (
+                      <McpPanel onClose={() => togglePanel('mcp')} />
                     )}
                   </div>
                 </div>
@@ -418,40 +422,32 @@ export default function App() {
               className="circles-out"
             >
               <div className="btn-stack">
-                {/* btn-1: Attach (front, rightmost) */}
+                {/* btn-1: Skills (front, rightmost) */}
                 <button
                   className="stack-btn stack-btn-1 glass-surface"
-                  title="Attach file"
-                  onClick={handleAttachFile}
-                  disabled={isRunning}
-                >
-                  <Paperclip size={17} />
-                </button>
-                {/* btn-2: Screenshot (middle) */}
-                <button
-                  className="stack-btn stack-btn-2 glass-surface"
-                  title="Take screenshot"
-                  onClick={handleScreenshot}
-                  disabled={isRunning}
-                >
-                  <Camera size={17} />
-                </button>
-                {/* btn-3: Skills */}
-                <button
-                  className="stack-btn stack-btn-3 glass-surface"
                   title="Skills & Plugins"
                   onClick={() => useSessionStore.getState().toggleMarketplace()}
                   disabled={isRunning}
                 >
                   <HeadCircuit size={17} />
                 </button>
-                {/* btn-4: Terminal */}
+                {/* btn-2: Terminal (middle) */}
                 <button
-                  className="stack-btn stack-btn-4 glass-surface"
+                  className="stack-btn stack-btn-2 glass-surface"
                   title="Terminal"
                   onClick={() => useSessionStore.getState().toggleTerminal()}
+                  disabled={isRunning}
                 >
                   <TerminalIcon size={17} />
+                </button>
+                {/* btn-3: MCP Servers (back, leftmost) */}
+                <button
+                  className="stack-btn stack-btn-3 glass-surface"
+                  title="MCP Servers"
+                  onClick={() => togglePanel('mcp')}
+                  disabled={isRunning}
+                >
+                  <Lightning size={17} />
                 </button>
               </div>
             </div>
@@ -462,7 +458,7 @@ export default function App() {
               className="glass-surface w-full"
               style={{ minHeight: 50, borderRadius: 25, padding: '0 6px 0 16px', background: colors.inputPillBg }}
             >
-              <InputBar />
+              <InputBar onAttachFile={handleAttachFile} onScreenshot={handleScreenshot} isRunning={isRunning} />
             </div>
           </div>
         </div>

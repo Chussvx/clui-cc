@@ -30,11 +30,19 @@ export interface CluiAPI {
   listInstalledPlugins(): Promise<string[]>
   installPlugin(repo: string, pluginName: string, marketplace: string, sourcePath?: string, isSkillMd?: boolean): Promise<{ ok: boolean; error?: string }>
   uninstallPlugin(pluginName: string): Promise<{ ok: boolean; error?: string }>
+  searchOnline(query: string): Promise<{ plugins: CatalogPlugin[]; error: string | null }>
+  fetchCommunitySkills(query?: string): Promise<{ plugins: CatalogPlugin[]; error: string | null }>
+  fetchSkillReadme(repo: string, skillPath: string): Promise<{ content: string; error: string | null }>
   // ─── Memory ───
   memoryList(projectPath?: string): Promise<MemoryListResult>
   memoryRead(projectPath: string, filename: string): Promise<string | null>
   memoryWrite(projectPath: string, filename: string, content: string): Promise<{ ok: boolean; error?: string }>
   memoryDelete(projectPath: string, filename: string): Promise<{ ok: boolean; error?: string }>
+
+  // ─── MCP management ───
+  mcpListConfig(): Promise<{ servers: Array<{ name: string; command: string; args: string[]; enabled: boolean }> }>
+  mcpReconnect(serverName: string): Promise<{ ok: boolean; error?: string }>
+  mcpToggle(serverName: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
 
   debugInjectWidget(tabId: string): Promise<{ success: boolean }>
   openWidgetWindow(title: string, srcDoc: string): Promise<{ success: boolean }>
@@ -119,11 +127,22 @@ const api: CluiAPI = {
     ipcRenderer.invoke(IPC.MARKETPLACE_INSTALL, { repo, pluginName, marketplace, sourcePath, isSkillMd }),
   uninstallPlugin: (pluginName) =>
     ipcRenderer.invoke(IPC.MARKETPLACE_UNINSTALL, { pluginName }),
+  searchOnline: (query) =>
+    ipcRenderer.invoke('clui:marketplace-search-online', query),
+  fetchCommunitySkills: (query?) =>
+    ipcRenderer.invoke('clui:marketplace-community', query),
+  fetchSkillReadme: (repo, skillPath) =>
+    ipcRenderer.invoke('clui:marketplace-skill-readme', repo, skillPath),
   // ─── Memory ───
   memoryList: (projectPath?: string) => ipcRenderer.invoke(IPC.MEMORY_LIST, projectPath),
   memoryRead: (projectPath, filename) => ipcRenderer.invoke(IPC.MEMORY_READ, { projectPath, filename }),
   memoryWrite: (projectPath, filename, content) => ipcRenderer.invoke(IPC.MEMORY_WRITE, { projectPath, filename, content }),
   memoryDelete: (projectPath, filename) => ipcRenderer.invoke(IPC.MEMORY_DELETE, { projectPath, filename }),
+
+  // ─── MCP management ───
+  mcpListConfig: () => ipcRenderer.invoke('clui:mcp-list-config'),
+  mcpReconnect: (serverName) => ipcRenderer.invoke('clui:mcp-reconnect', serverName),
+  mcpToggle: (serverName, enabled) => ipcRenderer.invoke('clui:mcp-toggle', { serverName, enabled }),
 
   debugInjectWidget: (tabId) => ipcRenderer.invoke('clui:debug-inject-widget', tabId),
   openWidgetWindow: (title, srcDoc) => ipcRenderer.invoke('clui:open-widget-window', { title, srcDoc }),

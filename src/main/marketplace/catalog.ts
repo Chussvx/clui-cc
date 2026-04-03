@@ -30,7 +30,8 @@ function validateSourcePath(p: string): boolean {
 
 function assertSkillDirContained(skillsDir: string, base: string): void {
   const resolved = resolve(skillsDir)
-  if (!resolved.startsWith(base + '/') && resolved !== base) {
+  const resolvedBase = resolve(base)
+  if (!resolved.startsWith(resolvedBase + '/') && !resolved.startsWith(resolvedBase + '\\') && resolved !== resolvedBase) {
     throw new Error(`Path escapes skills directory: ${resolved}`)
   }
 }
@@ -354,13 +355,18 @@ export async function uninstallPlugin(
 
 // ─── Helpers ───
 
-function netFetch(url: string): Promise<{ ok: boolean; status: number; body: string }> {
+function netFetch(url: string, timeoutMs = 15000): Promise<{ ok: boolean; status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const request = net.request(url)
+    const timer = setTimeout(() => {
+      request.abort()
+      reject(new Error(`Request timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
     request.on('response', (response) => {
       let body = ''
       response.on('data', (chunk) => { body += chunk.toString() })
       response.on('end', () => {
+        clearTimeout(timer)
         resolve({
           ok: response.statusCode >= 200 && response.statusCode < 300,
           status: response.statusCode,
@@ -368,7 +374,10 @@ function netFetch(url: string): Promise<{ ok: boolean; status: number; body: str
         })
       })
     })
-    request.on('error', (err) => reject(err))
+    request.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
     request.end()
   })
 }
@@ -435,6 +444,341 @@ function deriveSemanticTags(name: string, description: string, skillPath: string
     if (matched.length >= 2) break // Cap at 2 semantic tags
   }
   return matched
+}
+
+// ─── Online Search (GitHub + npm) ───
+
+let searchAbortController: AbortController | null = null
+
+export async function searchOnline(query: string): Promise<{ plugins: CatalogPlugin[]; error: string | null }> {
+  if (!query || query.trim().length < 2) {
+    return { plugins: [], error: null }
+  }
+
+  // Cancel any in-flight search
+  if (searchAbortController) searchAbortController.abort()
+  searchAbortController = new AbortController()
+
+  const results: CatalogPlugin[] = []
+  const errors: string[] = []
+
+  const searchTerm = query.trim()
+
+  // GitHub: search repos with "claude" + "mcp" or "skill" context
+  const githubSearch = (async () => {
+    try {
+      const q = encodeURIComponent(`${searchTerm} claude mcp in:name,description,readme`)
+      const url = `https://api.github.com/search/repositories?q=${q}&sort=stars&per_page=15`
+      const res = await netFetch(url)
+      if (!res.ok) return
+
+      const data = JSON.parse(res.body) as {
+        items?: Array<{
+          full_name: string
+          name: string
+          description: string | null
+          stargazers_count: number
+          owner: { login: string }
+          default_branch: string
+        }>
+      }
+
+      for (const item of (data.items || []).slice(0, 10)) {
+        // Skip if already in catalog
+        if (cachedPlugins?.some((p) => p.repo === item.full_name)) continue
+
+        results.push({
+          id: `github:${item.full_name}`,
+          name: item.name,
+          description: item.description || 'No description',
+          version: 'latest',
+          author: item.owner.login,
+          marketplace: 'GitHub',
+          repo: item.full_name,
+          sourcePath: '',
+          installName: item.name,
+          category: 'Community',
+          tags: deriveSemanticTags(item.name, item.description || '', ''),
+          isSkillMd: true,
+          source: 'github',
+          stars: item.stargazers_count,
+        })
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') errors.push(`GitHub: ${e.message}`)
+    }
+  })()
+
+  // npm: search for packages with "claude" or "mcp" keywords
+  const npmSearch = (async () => {
+    try {
+      const q = encodeURIComponent(`${searchTerm} claude mcp`)
+      const url = `https://registry.npmjs.org/-/v1/search?text=${q}&size=10`
+      const res = await netFetch(url)
+      if (!res.ok) return
+
+      const data = JSON.parse(res.body) as {
+        objects?: Array<{
+          package: {
+            name: string
+            description: string
+            version: string
+            publisher: { username: string }
+            links: { repository?: string; npm: string }
+          }
+          score: { detail: { popularity: number } }
+        }>
+      }
+
+      for (const obj of (data.objects || []).slice(0, 8)) {
+        const pkg = obj.package
+        // Extract repo from links
+        let repo = ''
+        if (pkg.links.repository) {
+          const match = pkg.links.repository.match(/github\.com\/([^/]+\/[^/]+)/)
+          if (match) repo = match[1].replace(/\.git$/, '')
+        }
+
+        // Skip if already in catalog or GitHub results
+        if (cachedPlugins?.some((p) => p.name === pkg.name)) continue
+        if (results.some((r) => r.name === pkg.name)) continue
+
+        results.push({
+          id: `npm:${pkg.name}`,
+          name: pkg.name,
+          description: pkg.description || 'No description',
+          version: pkg.version,
+          author: pkg.publisher?.username || 'Unknown',
+          marketplace: 'npm',
+          repo: repo || pkg.name,
+          sourcePath: '',
+          installName: pkg.name,
+          category: 'Community',
+          tags: deriveSemanticTags(pkg.name, pkg.description || '', ''),
+          isSkillMd: false,
+          source: 'npm',
+          downloads: Math.round(obj.score.detail.popularity * 100000),
+        })
+      }
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') errors.push(`npm: ${e.message}`)
+    }
+  })()
+
+  await Promise.allSettled([githubSearch, npmSearch])
+
+  // Sort: GitHub by stars desc, npm by downloads desc
+  results.sort((a, b) => (b.stars || 0) - (a.stars || 0) || (b.downloads || 0) - (a.downloads || 0))
+
+  return {
+    plugins: results,
+    error: errors.length > 0 ? errors.join('; ') : null,
+  }
+}
+
+// ─── Community Marketplace (claudemarketplaces.com) ───
+
+let communityCache: CatalogPlugin[] | null = null
+let communityCacheTimestamp = 0
+const COMMUNITY_CACHE_TTL = 10 * 60 * 1000 // 10 minutes
+
+export async function fetchCommunitySkills(query?: string): Promise<{ plugins: CatalogPlugin[]; error: string | null }> {
+  try {
+    // Return cached results if fresh and no specific query
+    if (!query && communityCache && Date.now() - communityCacheTimestamp < COMMUNITY_CACHE_TTL) {
+      return { plugins: communityCache, error: null }
+    }
+
+    const url = query
+      ? `https://claudemarketplaces.com/skills?q=${encodeURIComponent(query)}`
+      : 'https://claudemarketplaces.com/skills'
+
+    log(`fetchCommunitySkills: fetching ${url}`)
+    const res = await netFetch(url, 30000) // 30s timeout — page is ~1.2MB
+    if (!res.ok) {
+      return { plugins: [], error: `Community marketplace returned ${res.status}` }
+    }
+
+    const skills = parseCommunitySkills(res.body)
+    log(`fetchCommunitySkills: parsed ${skills.length} skills`)
+
+    // Filter by query client-side (since server search may not work reliably)
+    let filtered = skills
+    if (query) {
+      const q = query.toLowerCase()
+      filtered = skills.filter((s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.description.toLowerCase().includes(q) ||
+        s.repo.toLowerCase().includes(q) ||
+        s.tags.some((t) => t.toLowerCase().includes(q))
+      )
+    }
+
+    // Cache full results (unfiltered)
+    if (!query) {
+      communityCache = skills
+      communityCacheTimestamp = Date.now()
+    }
+
+    return { plugins: filtered, error: null }
+  } catch (err: unknown) {
+    const raw = err instanceof Error ? err.message : String(err)
+    log(`fetchCommunitySkills error: ${raw}`)
+    const msg = raw.includes('timed out') || raw.includes('TIMED_OUT')
+      ? 'Community marketplace timed out — check your connection and try again.'
+      : raw.includes('ERR_CONNECTION') || raw.includes('ENOTFOUND')
+        ? 'Could not reach claudemarketplaces.com — check your internet connection.'
+        : raw
+    return { plugins: [], error: msg }
+  }
+}
+
+/** Generate a readable description from a hyphenated skill name + repo when none is provided */
+function describeSkill(name: string, repo: string): string {
+  // "web-design-guidelines" → "Web design guidelines"
+  const readable = name.replace(/[-_]+/g, ' ').replace(/^\w/, (c) => c.toUpperCase())
+  const owner = repo.split('/')[0] || ''
+  return `${readable} — by ${owner}`
+}
+
+function parseCommunitySkills(html: string): CatalogPlugin[] {
+  const plugins: CatalogPlugin[] = []
+  const seen = new Set<string>()
+
+  // Strategy 1: Try to extract the JSON skills array from the RSC payload.
+  // The __next_f.push calls contain escaped JSON. We look for the "skills":[...]
+  // array inside the push that has skill data.
+  try {
+    // Find the push containing "skills" array — it appears as \"skills\":[ in raw HTML
+    const skillsArrayMatch = html.match(/\\?"skills\\?":\[(\{.*?\})\]/s)
+    if (!skillsArrayMatch) throw new Error('no skills array found')
+
+    // Extract just the array content and normalize escaped quotes
+    let arrayStr = '[' + skillsArrayMatch[1] + ']'
+    // The RSC payload escapes quotes as \" or \\" — normalize to plain quotes
+    arrayStr = arrayStr.replace(/\\\\"/g, '\\"') // \\\" → \"
+    arrayStr = arrayStr.replace(/\\"/g, '"')      // \" → "
+
+    const skillsArr = JSON.parse(arrayStr) as Array<Record<string, unknown>>
+    for (const s of skillsArr) {
+      const name = String(s.name || '')
+      const repo = String(s.repo || '')
+      const path = String(s.path || '')
+      if (!name || !repo) continue
+      const id = `community:${repo}/${path}`
+      if (seen.has(id)) continue
+      seen.add(id)
+      const desc = String(s.description || '') || describeSkill(name, repo)
+      plugins.push({
+        id,
+        name,
+        description: desc,
+        version: 'latest',
+        author: repo.split('/')[0] || 'Unknown',
+        marketplace: 'Community',
+        repo,
+        sourcePath: path,
+        installName: name,
+        category: 'Community',
+        tags: deriveSemanticTags(name, desc, path),
+        isSkillMd: true,
+        source: 'community',
+        stars: typeof s.stars === 'number' ? s.stars : undefined,
+        downloads: typeof s.installs === 'number' ? s.installs : undefined,
+      })
+    }
+  } catch (e) {
+    log(`parseCommunitySkills: JSON strategy failed (${e instanceof Error ? e.message : e}), trying regex fallback`)
+  }
+
+  // Strategy 2: Fallback — match "npx skills add" install commands directly on raw HTML.
+  // These don't require quote normalization and reliably capture repo + skill name.
+  if (plugins.length === 0) {
+    // Build a stars/installs lookup from nearby numeric data
+    const statsMap = new Map<string, { stars?: number; installs?: number; description?: string }>()
+    // Match full skill object fragments with escaped quotes
+    const fragPattern = /\\?"name\\?":\\?"([^"\\]+)\\?"[^}]*?\\?"stars\\?":\s*(\d+)[^}]*?\\?"installs\\?":\s*(\d+)/g
+    let fragMatch: RegExpExecArray | null
+    while ((fragMatch = fragPattern.exec(html)) !== null) {
+      statsMap.set(fragMatch[1], { stars: parseInt(fragMatch[2], 10), installs: parseInt(fragMatch[3], 10) })
+    }
+
+    const altPattern = /npx skills add https:\/\/github\.com\/([\w._-]+\/[\w._-]+)\s+--skill\s+([\w._-]+)/g
+    let match: RegExpExecArray | null
+    while ((match = altPattern.exec(html)) !== null) {
+      const [, repoPath, skillName] = match
+      const id = `community:${repoPath}/${skillName}`
+      if (seen.has(id)) continue
+      seen.add(id)
+      const stats = statsMap.get(skillName)
+
+      plugins.push({
+        id,
+        name: skillName,
+        description: stats?.description || describeSkill(skillName, repoPath),
+        version: 'latest',
+        author: repoPath.split('/')[0] || 'Unknown',
+        marketplace: 'Community',
+        repo: repoPath,
+        sourcePath: skillName,
+        installName: skillName,
+        category: 'Community',
+        tags: deriveSemanticTags(skillName, '', ''),
+        isSkillMd: true,
+        source: 'community',
+        stars: stats?.stars,
+        downloads: stats?.installs,
+      })
+    }
+  }
+
+  log(`parseCommunitySkills: found ${plugins.length} skills from HTML (${html.length} bytes)`)
+
+  // Sort by installs/stars descending
+  plugins.sort((a, b) => (b.downloads || 0) - (a.downloads || 0) || (b.stars || 0) - (a.stars || 0))
+
+  return plugins
+}
+
+// ─── Skill Detail Fetcher ───
+
+const skillDetailCache = new Map<string, string>()
+
+/**
+ * Fetch the SKILL.md (or README.md) content from GitHub for a given repo/path.
+ * Returns the raw markdown text, or an error message.
+ */
+export async function fetchSkillReadme(repo: string, skillPath: string): Promise<{ content: string; error: string | null }> {
+  if (!validateRepo(repo)) {
+    return { content: '', error: 'Invalid repo format' }
+  }
+
+  const cacheKey = `${repo}/${skillPath}`
+  if (skillDetailCache.has(cacheKey)) {
+    return { content: skillDetailCache.get(cacheKey)!, error: null }
+  }
+
+  // Try multiple possible file locations
+  const candidates = [
+    `https://raw.githubusercontent.com/${repo}/main/${skillPath}/SKILL.md`,
+    `https://raw.githubusercontent.com/${repo}/main/${skillPath}/README.md`,
+    `https://raw.githubusercontent.com/${repo}/master/${skillPath}/SKILL.md`,
+    `https://raw.githubusercontent.com/${repo}/master/${skillPath}/README.md`,
+  ]
+
+  for (const url of candidates) {
+    try {
+      const res = await netFetch(url)
+      if (res.ok && res.body.trim()) {
+        skillDetailCache.set(cacheKey, res.body)
+        return { content: res.body, error: null }
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  return { content: '', error: 'Could not find SKILL.md or README.md' }
 }
 
 function execAsync(cmd: string, args: string[], timeout: number): Promise<{ exitCode: number; stdout: string; stderr: string }> {

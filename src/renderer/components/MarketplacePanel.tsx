@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, MagnifyingGlass, SpinnerGap, ArrowClockwise, HeadCircuit, Compass, GithubLogo } from '@phosphor-icons/react'
+import { X, MagnifyingGlass, SpinnerGap, ArrowClockwise, HeadCircuit, Compass, GithubLogo, Package, Star, DownloadSimple, Globe } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useColors } from '../theme'
 import type { CatalogPlugin, PluginStatus } from '../../shared/types'
@@ -22,22 +22,50 @@ export function MarketplacePanel() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
 
+  // Online search state
+  const [onlineResults, setOnlineResults] = useState<CatalogPlugin[]>([])
+  const [onlineLoading, setOnlineLoading] = useState(false)
+  const [onlineError, setOnlineError] = useState<string | null>(null)
+  const [showOnline, setShowOnline] = useState(false)
+  const onlineSearchRef = useRef<ReturnType<typeof setTimeout>>()
+
+  // Community marketplace state
+  const [communityResults, setCommunityResults] = useState<CatalogPlugin[]>([])
+  const [communityLoading, setCommunityLoading] = useState(false)
+  const [communityError, setCommunityError] = useState<string | null>(null)
+  const [communityLoaded, setCommunityLoaded] = useState(false)
+
+  // View mode toggle: 'official' | 'online' | 'all'
+  const [viewMode, setViewMode] = useState<'official' | 'online' | 'all'>('all')
+
   // Derive filter chips dynamically from catalog semantic tags, sorted by frequency
+  // Uses Set-based multi-select (toggle on/off)
+  const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set())
+
   const filters = useMemo(() => {
     const tagCounts = new Map<string, number>()
-    for (const p of catalog) {
+    const sources = viewMode === 'online' ? communityResults : viewMode === 'all' ? [...catalog, ...communityResults] : catalog
+    for (const p of sources) {
       for (const t of (p.tags || [])) {
         tagCounts.set(t, (tagCounts.get(t) || 0) + 1)
       }
     }
-    // Sort by frequency (descending), then alphabetically
     const sorted = [...tagCounts.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([tag]) => tag)
-    return ['All', ...sorted, 'Installed']
-  }, [catalog])
+    return [...sorted, 'Installed']
+  }, [catalog, communityResults, viewMode])
 
-  // Debounced search
+  const toggleFilter = useCallback((f: string) => {
+    setActiveFilters((prev) => {
+      const next = new Set(prev)
+      if (next.has(f)) next.delete(f)
+      else next.add(f)
+      return next
+    })
+  }, [])
+
+  // Debounced search + online trigger
   const [localSearch, setLocalSearch] = useState(search)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>()
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -45,11 +73,53 @@ export function MarketplacePanel() {
     setLocalSearch(val)
     clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => setSearch(val), 200)
+
+    // Trigger online search after 600ms of no typing (only if 3+ chars)
+    clearTimeout(onlineSearchRef.current)
+    if (val.trim().length >= 3) {
+      onlineSearchRef.current = setTimeout(async () => {
+        setOnlineLoading(true)
+        setOnlineError(null)
+        try {
+          const res = await window.clui.searchOnline(val.trim())
+          setOnlineResults(res.plugins)
+          if (res.error) setOnlineError(res.error)
+          setShowOnline(true)
+        } catch {
+          setOnlineError('Search failed')
+        } finally {
+          setOnlineLoading(false)
+        }
+      }, 600)
+    } else {
+      setOnlineResults([])
+      setShowOnline(false)
+    }
   }, [setSearch])
 
-  useEffect(() => () => clearTimeout(debounceRef.current), [])
+  useEffect(() => () => {
+    clearTimeout(debounceRef.current)
+    clearTimeout(onlineSearchRef.current)
+  }, [])
 
-  // Filtered plugins
+  // Fetch community skills when switching to Online or All view
+  useEffect(() => {
+    if ((viewMode === 'online' || viewMode === 'all') && !communityLoaded && !communityLoading) {
+      setCommunityLoading(true)
+      setCommunityError(null)
+      window.clui.fetchCommunitySkills().then((res) => {
+        setCommunityResults(res.plugins)
+        if (res.error) setCommunityError(res.error)
+        setCommunityLoaded(true)
+      }).catch(() => {
+        setCommunityError('Failed to load community marketplace')
+      }).finally(() => {
+        setCommunityLoading(false)
+      })
+    }
+  }, [viewMode, communityLoaded, communityLoading])
+
+  // Filtered plugins (multi-select pill filters)
   const lowerSearch = localSearch.toLowerCase()
   const filtered = useMemo(() => {
     return catalog.filter((p) => {
@@ -64,12 +134,33 @@ export function MarketplacePanel() {
         (p.repo || '').toLowerCase().includes(lowerSearch) ||
         (p.marketplace || '').toLowerCase().includes(lowerSearch)
       const matchesFilter =
-        filter === 'All' ||
-        (filter === 'Installed' && pluginStates[p.id] === 'installed') ||
-        pluginTags.includes(filter)
+        activeFilters.size === 0 ||
+        (activeFilters.has('Installed') && pluginStates[p.id] === 'installed') ||
+        pluginTags.some((t) => activeFilters.has(t))
       return matchesSearch && matchesFilter
     })
-  }, [catalog, lowerSearch, filter, pluginStates])
+  }, [catalog, lowerSearch, activeFilters, pluginStates])
+
+  // Filtered community skills (respects both search and pill filters)
+  const filteredCommunity = useMemo(() => {
+    if (!communityResults.length) return []
+    return communityResults.filter((p) => {
+      const pluginName = (p.name || '').toLowerCase()
+      const pluginRepo = (p.repo || '').toLowerCase()
+      const pluginDesc = (p.description || '').toLowerCase()
+      const pluginTags = Array.isArray(p.tags) ? p.tags : []
+      const matchesSearch = !lowerSearch ||
+        pluginName.includes(lowerSearch) ||
+        pluginRepo.includes(lowerSearch) ||
+        pluginDesc.includes(lowerSearch) ||
+        pluginTags.some((t) => String(t).toLowerCase().includes(lowerSearch))
+      const matchesFilter =
+        activeFilters.size === 0 ||
+        (activeFilters.has('Installed') && pluginStates[p.id] === 'installed') ||
+        pluginTags.some((t) => activeFilters.has(t))
+      return matchesSearch && matchesFilter
+    })
+  }, [communityResults, lowerSearch, activeFilters, pluginStates])
 
   // Reorder cards so expanded card sits on a full-width row with no grid gaps.
   // If the expanded card was in the right column (odd index), its left neighbor
@@ -117,7 +208,7 @@ export function MarketplacePanel() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 11, color: colors.textTertiary }}>
-            {filtered.length} result{filtered.length === 1 ? '' : 's'}
+            {viewMode === 'official' ? filtered.length : viewMode === 'online' ? filteredCommunity.length : filtered.length + filteredCommunity.length} result{(viewMode === 'official' ? filtered.length : viewMode === 'online' ? filteredCommunity.length : filtered.length + filteredCommunity.length) === 1 ? '' : 's'}
           </span>
           <button
             onClick={() => loadMarketplace(true)}
@@ -204,68 +295,204 @@ export function MarketplacePanel() {
         </button>
       </div>
 
-      {/* Filter chips */}
+      {/* View mode toggle */}
       <div style={{
         display: 'flex',
-        gap: 8,
+        gap: 4,
+        padding: '8px 18px 6px',
+        justifyContent: 'flex-start',
+      }}>
+        {(['official', 'all', 'online'] as const).map((mode) => {
+          const isActive = viewMode === mode
+          const modeLabel = mode === 'official' ? 'Official' : mode === 'all' ? 'All' : 'Online'
+          return (
+            <button
+              key={mode}
+              onClick={() => setViewMode(mode)}
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                padding: '4px 10px',
+                borderRadius: 6,
+                border: `1px solid ${isActive ? colors.accent : colors.containerBorder}`,
+                background: isActive ? colors.accent : 'transparent',
+                color: isActive ? colors.textOnAccent : colors.textSecondary,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s ease',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {modeLabel}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Pill filters */}
+      <div style={{
+        display: 'flex',
+        gap: 6,
         padding: '0 18px 12px',
         overflowX: 'auto',
         scrollbarWidth: 'none',
+        flexWrap: 'wrap',
       }}>
-        {filters.map((f) => (
+        {filters.map((f) => {
+          const active = activeFilters.has(f)
+          return (
+            <button
+              key={f}
+              onClick={() => toggleFilter(f)}
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                padding: '5px 10px',
+                borderRadius: 999,
+                border: `1px solid ${active ? colors.accent : colors.containerBorder}`,
+                background: active ? colors.accent : 'transparent',
+                color: active ? colors.textOnAccent : colors.textSecondary,
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                transition: 'all 0.18s ease',
+                whiteSpace: 'nowrap',
+                lineHeight: 1,
+              }}
+            >
+              {f}
+            </button>
+          )
+        })}
+        {activeFilters.size > 0 && (
           <button
-            key={f}
-            onClick={() => setFilter(f)}
+            onClick={() => setActiveFilters(new Set())}
             style={{
-              fontSize: 11,
-              fontWeight: 600,
-              padding: '6px 11px',
+              fontSize: 10,
+              fontWeight: 500,
+              padding: '5px 8px',
               borderRadius: 999,
-              border: `1px solid ${filter === f ? colors.accent : colors.containerBorder}`,
-              background: filter === f ? colors.accentLight : 'transparent',
-              color: filter === f ? colors.accent : colors.textSecondary,
+              border: 'none',
+              background: 'transparent',
+              color: colors.textTertiary,
               cursor: 'pointer',
               fontFamily: 'inherit',
-              transition: 'all 0.15s',
+              textDecoration: 'underline',
               whiteSpace: 'nowrap',
             }}
           >
-            {f}
+            Clear
           </button>
-        ))}
+        )}
       </div>
 
       {/* Body */}
       <div ref={scrollContainerRef} style={{ flex: 1, overflowY: 'auto', padding: '0 18px', scrollbarWidth: 'thin' }}>
-        {loading ? (
+        {loading && viewMode === 'official' ? (
           <LoadingState colors={colors} />
-        ) : error ? (
+        ) : error && viewMode === 'official' ? (
           <ErrorState error={error} colors={colors} onRetry={() => loadMarketplace(true)} />
-        ) : filtered.length === 0 ? (
-          <EmptyState colors={colors} />
         ) : (
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 10,
-              paddingBottom: 6,
-            }}
-          >
-            {displayOrder.map((plugin) => (
-              <PluginCard
-                key={plugin.id}
-                plugin={plugin}
-                status={pluginStates[plugin.id] || 'not_installed'}
-                colors={colors}
-                expanded={expandedId === plugin.id}
-                scrollContainerRef={scrollContainerRef}
-                onToggleExpand={() => {
-                  setExpandedId(expandedId === plugin.id ? null : plugin.id)
-                }}
-              />
-            ))}
-          </div>
+          <>
+            {/* Official catalog results */}
+            {(viewMode === 'official' || viewMode === 'all') && (
+              filtered.length > 0 ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 10,
+                    paddingBottom: 6,
+                  }}
+                >
+                  {displayOrder.map((plugin) => (
+                    <PluginCard
+                      key={plugin.id}
+                      plugin={plugin}
+                      status={pluginStates[plugin.id] || 'not_installed'}
+                      colors={colors}
+                      expanded={expandedId === plugin.id}
+                      scrollContainerRef={scrollContainerRef}
+                      onToggleExpand={() => {
+                        setExpandedId(expandedId === plugin.id ? null : plugin.id)
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : viewMode === 'official' ? (
+                <EmptyState colors={colors} />
+              ) : null
+            )}
+
+            {/* Community marketplace results (claudemarketplaces.com) */}
+            {(viewMode === 'online' || viewMode === 'all') && (
+              <div style={{ marginTop: (viewMode === 'all' && filtered.length > 0) ? 16 : 0, paddingBottom: 10 }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  marginBottom: 10, padding: '0 2px',
+                }}>
+                  <Globe size={12} style={{ color: colors.textTertiary }} />
+                  <span style={{ fontSize: 11, fontWeight: 600, color: colors.textSecondary }}>
+                    Community Marketplace
+                  </span>
+                  <span style={{ fontSize: 9, color: colors.textTertiary }}>
+                    claudemarketplaces.com
+                  </span>
+                  {communityLoading && (
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                      style={{ display: 'flex' }}
+                    >
+                      <SpinnerGap size={11} style={{ color: colors.accent }} />
+                    </motion.div>
+                  )}
+                  {communityError && (
+                    <span style={{ fontSize: 10, color: colors.statusError }}>
+                      {communityError}
+                      {' '}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setCommunityError(null)
+                          setCommunityLoaded(false)
+                        }}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: colors.accent, fontSize: 10, fontFamily: 'inherit',
+                          textDecoration: 'underline', padding: 0,
+                        }}
+                      >
+                        Retry
+                      </button>
+                    </span>
+                  )}
+                </div>
+                {communityLoading ? (
+                  <LoadingState colors={colors} />
+                ) : filteredCommunity.length === 0 ? (
+                  <div style={{ fontSize: 11, color: colors.textTertiary, padding: '8px 2px' }}>
+                    {lowerSearch ? 'No community results match your search' : 'No community skills found'}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                    {filteredCommunity.slice(0, 50).map((plugin) => (
+                      <PluginCard
+                        key={plugin.id}
+                        plugin={plugin}
+                        status={pluginStates[plugin.id] || 'not_installed'}
+                        colors={colors}
+                        expanded={expandedId === plugin.id}
+                        scrollContainerRef={scrollContainerRef}
+                        onToggleExpand={() => {
+                          setExpandedId(expandedId === plugin.id ? null : plugin.id)
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -284,6 +511,8 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
 }) {
   const [showConfirm, setShowConfirm] = useState(false)
+  const [readmeContent, setReadmeContent] = useState<string | null>(null)
+  const [readmeLoading, setReadmeLoading] = useState(false)
   const installPlugin = useSessionStore((s) => s.installMarketplacePlugin)
   const uninstallPlugin = useSessionStore((s) => s.uninstallMarketplacePlugin)
   const cardRef = useRef<HTMLDivElement>(null)
@@ -292,6 +521,16 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
   useEffect(() => {
     if (expanded) needsScrollRef.current = true
   }, [expanded])
+
+  // Fetch SKILL.md / README.md when card is expanded
+  useEffect(() => {
+    if (expanded && !readmeContent && !readmeLoading && plugin.repo && plugin.sourcePath) {
+      setReadmeLoading(true)
+      window.clui.fetchSkillReadme(plugin.repo, plugin.sourcePath).then((res) => {
+        if (res.content) setReadmeContent(res.content)
+      }).finally(() => setReadmeLoading(false))
+    }
+  }, [expanded, readmeContent, readmeLoading, plugin.repo, plugin.sourcePath])
 
   const handleLayoutComplete = useCallback(() => {
     if (!needsScrollRef.current || !expanded || !cardRef.current || !scrollContainerRef.current) return
@@ -423,9 +662,39 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
           }}>
             {safeDescription}
           </div>
-          <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8 }}>
-            {safeRepo} · by {safeAuthor} · v{safeVersion}
+          <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <SourceBadge plugin={plugin} colors={colors} />
+            <span>{safeRepo} · by {safeAuthor} · v{safeVersion}</span>
           </div>
+
+          {/* SKILL.md / README content */}
+          {readmeLoading && (
+            <div style={{
+              marginTop: 10, padding: '8px 12px', borderRadius: 8,
+              background: colors.surfacePrimary, border: `1px solid ${colors.containerBorder}`,
+              fontSize: 11, color: colors.textTertiary, display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                style={{ display: 'flex' }}
+              >
+                <SpinnerGap size={12} style={{ color: colors.accent }} />
+              </motion.div>
+              Loading skill details...
+            </div>
+          )}
+          {readmeContent && (
+            <div style={{
+              marginTop: 10, padding: '10px 12px', borderRadius: 8,
+              background: colors.surfacePrimary, border: `1px solid ${colors.containerBorder}`,
+              fontSize: 11, color: colors.textSecondary, lineHeight: 1.6,
+              maxHeight: 200, overflowY: 'auto',
+              whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            }}>
+              {readmeContent.length > 1500 ? readmeContent.slice(0, 1500) + '...' : readmeContent}
+            </div>
+          )}
 
           {/* Confirm panel or installing status */}
           {showConfirm && status === 'not_installed' && (
@@ -514,8 +783,9 @@ function PluginCard({ plugin, status, colors, expanded, onToggleExpand, scrollCo
             }}>
               {safeDescription}
             </div>
-            <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8 }}>
-              {safeRepo} · by {safeAuthor} · v{safeVersion}
+            <div style={{ fontSize: 10, color: colors.textTertiary, marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <SourceBadge plugin={plugin} colors={colors} />
+              <span>{safeRepo} · by {safeAuthor}</span>
             </div>
           </div>
           <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -607,6 +877,49 @@ function StatusButton({ status, colors, onClick, onUninstall }: {
         </button>
       )
   }
+}
+
+function SourceBadge({ plugin, colors }: {
+  plugin: CatalogPlugin
+  colors: ReturnType<typeof useColors>
+}) {
+  const source = plugin.source || 'catalog'
+
+  const configs: Record<string, { icon: React.ReactNode; label: string; bg: string; color: string; border: string }> = {
+    catalog: { icon: <HeadCircuit size={10} />, label: 'Catalog', bg: colors.accentLight, color: colors.accent, border: colors.accentBorder },
+    github: { icon: <GithubLogo size={10} />, label: plugin.stars ? `${formatNumber(plugin.stars)}` : 'GitHub', bg: 'rgba(110,84,148,0.12)', color: '#8b6db5', border: 'rgba(110,84,148,0.25)' },
+    npm: { icon: <Package size={10} />, label: plugin.downloads ? `${formatNumber(plugin.downloads)}/w` : 'npm', bg: 'rgba(203,56,55,0.1)', color: '#cb3837', border: 'rgba(203,56,55,0.2)' },
+    community: { icon: <Globe size={10} />, label: plugin.downloads ? `${formatNumber(plugin.downloads)} installs` : 'Community', bg: 'rgba(59,130,246,0.1)', color: '#3b82f6', border: 'rgba(59,130,246,0.2)' },
+  }
+  const config = configs[source] || configs.catalog
+
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 3,
+      fontSize: 9,
+      fontWeight: 600,
+      padding: '2px 6px',
+      borderRadius: 999,
+      background: config.bg,
+      color: config.color,
+      border: `1px solid ${config.border}`,
+      whiteSpace: 'nowrap',
+      lineHeight: 1,
+    }}>
+      {config.icon}
+      {config.label}
+      {source === 'github' && plugin.stars != null && <Star size={8} weight="fill" />}
+      {source === 'npm' && plugin.downloads != null && <DownloadSimple size={8} />}
+    </span>
+  )
+}
+
+function formatNumber(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
 }
 
 function Tag({ label, colors, emphasis }: {

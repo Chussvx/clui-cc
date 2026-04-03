@@ -5,7 +5,7 @@ import { createInterface } from 'readline'
 import { homedir } from 'os'
 import { ControlPlane } from './claude/control-plane'
 import { ensureSkills, type SkillStatus } from './skills/installer'
-import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './marketplace/catalog'
+import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin, searchOnline, fetchCommunitySkills, fetchSkillReadme } from './marketplace/catalog'
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
 import { TerminalManager } from './terminal-manager'
@@ -533,6 +533,104 @@ ipcMain.handle('clui:open-widget-window', (_event, { title, srcDoc }: { title: s
   widgetStore.set(id, srcDoc)
   widgetWin.loadURL(`clui-widget://widget/${id}`)
   return { success: true }
+})
+
+// ─── MCP management ───
+
+function getClaudeConfigPath(): string {
+  return join(homedir(), '.claude.json')
+}
+
+function readClaudeConfig(): Record<string, any> {
+  try {
+    const raw = readFileSync(getClaudeConfigPath(), 'utf8')
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
+}
+
+function writeClaudeConfig(config: Record<string, any>): void {
+  writeFileSync(getClaudeConfigPath(), JSON.stringify(config, null, 2), 'utf8')
+}
+
+ipcMain.handle('clui:mcp-list-config', () => {
+  const config = readClaudeConfig()
+  const servers: Array<{ name: string; command: string; args: string[]; enabled: boolean }> = []
+
+  // Top-level mcpServers (local servers)
+  const mcpServers = config.mcpServers || {}
+  for (const [name, entry] of Object.entries(mcpServers)) {
+    const srv = entry as any
+    servers.push({
+      name,
+      command: srv.command || '',
+      args: srv.args || [],
+      enabled: srv.disabled !== true,
+    })
+  }
+
+  // Project-scoped servers
+  const projects = config.projects || {}
+  for (const [_path, proj] of Object.entries(projects)) {
+    const pMcp = (proj as any).mcpServers || {}
+    for (const [name, entry] of Object.entries(pMcp)) {
+      // Avoid duplicates if already listed at top level
+      if (!servers.find((s) => s.name === name)) {
+        const srv = entry as any
+        servers.push({
+          name,
+          command: srv.command || '',
+          args: srv.args || [],
+          enabled: srv.disabled !== true,
+        })
+      }
+    }
+  }
+
+  return { servers }
+})
+
+ipcMain.handle('clui:mcp-toggle', (_event, { serverName, enabled }: { serverName: string; enabled: boolean }) => {
+  try {
+    const config = readClaudeConfig()
+    // Check top-level mcpServers first
+    if (config.mcpServers?.[serverName]) {
+      if (enabled) {
+        delete config.mcpServers[serverName].disabled
+      } else {
+        config.mcpServers[serverName].disabled = true
+      }
+      writeClaudeConfig(config)
+      return { ok: true }
+    }
+
+    // Check project-scoped servers
+    const projects = config.projects || {}
+    for (const [_path, proj] of Object.entries(projects)) {
+      const pMcp = (proj as any).mcpServers || {}
+      if (pMcp[serverName]) {
+        if (enabled) {
+          delete pMcp[serverName].disabled
+        } else {
+          pMcp[serverName].disabled = true
+        }
+        writeClaudeConfig(config)
+        return { ok: true }
+      }
+    }
+
+    return { ok: false, error: `Server "${serverName}" not found in config` }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('clui:mcp-reconnect', async (_event, serverName: string) => {
+  log(`MCP reconnect requested: ${serverName}`)
+  // Reconnect triggers a session re-init which will re-establish MCP connections
+  // For now, return success — the actual reconnection happens when the session restarts
+  return { ok: true }
 })
 
 ipcMain.handle(IPC.ORCH_ANALYZE, async (_event, prompt: string) => {
@@ -1430,6 +1528,21 @@ ipcMain.handle(IPC.MARKETPLACE_INSTALL, async (_event, { repo, pluginName, marke
 ipcMain.handle(IPC.MARKETPLACE_UNINSTALL, async (_event, { pluginName }: { pluginName: string }) => {
   log(`IPC MARKETPLACE_UNINSTALL: ${pluginName}`)
   return uninstallPlugin(pluginName)
+})
+
+ipcMain.handle('clui:marketplace-search-online', async (_event, query: string) => {
+  log(`IPC MARKETPLACE_SEARCH_ONLINE: "${query}"`)
+  return searchOnline(query)
+})
+
+ipcMain.handle('clui:marketplace-community', async (_event, query?: string) => {
+  log(`IPC MARKETPLACE_COMMUNITY: "${query || ''}"`)
+  return fetchCommunitySkills(query)
+})
+
+ipcMain.handle('clui:marketplace-skill-readme', async (_event, repo: string, skillPath: string) => {
+  log(`IPC MARKETPLACE_SKILL_README: "${repo}/${skillPath}"`)
+  return fetchSkillReadme(repo, skillPath)
 })
 
 // ─── Theme Detection ───

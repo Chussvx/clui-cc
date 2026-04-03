@@ -425,6 +425,9 @@ export interface CatalogPlugin {
   category: string        // 'Agent Skills' | 'Knowledge Work' | 'Financial Services'
   tags: string[]          // Semantic use-case tags derived from name/description (e.g. 'Design', 'Finance')
   isSkillMd: boolean      // true = individual SKILL.md (direct install), false = CLI plugin (bundle install)
+  source?: 'catalog' | 'github' | 'npm' | 'community' // origin: catalog (default), github search, npm search, community marketplace
+  stars?: number          // GitHub stars (online search results)
+  downloads?: number      // npm weekly downloads (online search results)
 }
 
 // ─── IPC Channel Names ───
